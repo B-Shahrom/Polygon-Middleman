@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -E '\\\\.\\(tsx|ts|jsx|js\\)$')",
+      "Bash(find \"C:/Users/shahr/Projects/Polygon_Middleman/frontend/src\" -type f -exec ls -lh {})",
+      "Bash(npx tsc:*)",
+      "Bash(xargs sed:*)",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(./venv/Scripts/python.exe -c \"import requests; print\\(''requests available:'', requests.__version__\\)\")",
+      "Bash(./venv/Scripts/pip.exe install:*)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:codeforces.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:pypi.org)",
+      "Bash(npm install:*)",
+      "Bash(xargs grep:*)",
+      "Bash(pip install:*)",
+      "Bash(python generate_editorial.py)",
+      "Bash(python -c \":*)",
+      "Bash(python3 -c \"from datetime import datetime, timedelta, timezone; utc_now = datetime.now\\(timezone.utc\\); in_30min = utc_now + timedelta\\(minutes=30\\); print\\(f'UTC now: {utc_now.strftime\\(\\\\\"%H:%M\\\\\"\\)}\\\\nIn 30 min: {in_30min.strftime\\(\\\\\"%H:%M\\\\\"\\)}'\\)\")",
+      "Bash(git config:*)",
+      "Bash(git add:*)"
+    ]
+  }
+}

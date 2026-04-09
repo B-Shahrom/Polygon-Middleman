@@ -1,0 +1,132 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: 'Inter', system-ui, sans-serif;
+  background-color: #110f0d;
+  color: #e8e2d9;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #1a1714;
+}
+::-webkit-scrollbar-thumb {
+  background: #362f28;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #f59e0b;
+}
+
+/* Code / mono */
+code, pre, .font-mono {
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+}
+
+/* Focus ring */
+*:focus-visible {
+  outline: 2px solid #f59e0b;
+  outline-offset: 2px;
+}
+
+/* Textarea resize */
+textarea {
+  resize: vertical;
+}
+
+/* Smooth transitions */
+.transition-default {
+  transition: all 0.15s ease;
+}
+
+/* Custom badge colors for solution tags */
+.tag-MA { @apply bg-amber-500/20 text-amber-300 border border-amber-500/30; }
+.tag-OK { @apply bg-green-500/20 text-green-300 border border-green-500/30; }
+.tag-RJ { @apply bg-red-500/20 text-red-300 border border-red-500/30; }
+.tag-TL { @apply bg-yellow-500/20 text-yellow-300 border border-yellow-500/30; }
+.tag-TO { @apply bg-orange-500/20 text-orange-300 border border-orange-500/30; }
+.tag-WA { @apply bg-red-600/20 text-red-400 border border-red-600/30; }
+.tag-PE { @apply bg-purple-500/20 text-purple-300 border border-purple-500/30; }
+.tag-ML { @apply bg-blue-500/20 text-blue-300 border border-blue-500/30; }
+.tag-RE { @apply bg-pink-500/20 text-pink-300 border border-pink-500/30; }
+.tag-TM { @apply bg-amber-600/20 text-amber-300 border border-amber-600/30; }
+.tag-NR { @apply bg-gray-500/20 text-gray-300 border border-gray-500/30; }
+.tag-FL { @apply bg-rose-600/20 text-rose-300 border border-rose-600/30; }
+
+/* ── Animations ────────────────────────────────────────────────────────── */
+
+/* Fade in + slide up — used for page / card entrance */
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-in-up {
+  animation: fadeInUp 0.3s ease-out both;
+}
+
+/* Fade in only — used for overlays, toasts */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.animate-fade-in {
+  animation: fadeIn 0.2s ease-out both;
+}
+
+/* Scale in — used for modals */
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(0.95); }
+  to   { opacity: 1; transform: scale(1); }
+}
+.animate-scale-in {
+  animation: scaleIn 0.2s ease-out both;
+}
+
+/* Slide in from left — used for sidebar */
+@keyframes slideInLeft {
+  from { opacity: 0; transform: translateX(-16px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+.animate-slide-in-left {
+  animation: slideInLeft 0.25s ease-out both;
+}
+
+/* Slide up for floating bars */
+@keyframes slideUp {
+  from { opacity: 0; transform: translate(-50%, 16px); }
+  to   { opacity: 1; transform: translate(-50%, 0); }
+}
+.animate-slide-up {
+  animation: slideUp 0.25s ease-out both;
+}
+
+/* Staggered children — apply to parent, each child delays */
+.stagger-children > * {
+  animation: fadeInUp 0.3s ease-out both;
+}
+.stagger-children > *:nth-child(1) { animation-delay: 0ms; }
+.stagger-children > *:nth-child(2) { animation-delay: 40ms; }
+.stagger-children > *:nth-child(3) { animation-delay: 80ms; }
+.stagger-children > *:nth-child(4) { animation-delay: 120ms; }
+.stagger-children > *:nth-child(5) { animation-delay: 160ms; }
+.stagger-children > *:nth-child(6) { animation-delay: 200ms; }
+.stagger-children > *:nth-child(7) { animation-delay: 240ms; }
+.stagger-children > *:nth-child(8) { animation-delay: 280ms; }
+.stagger-children > *:nth-child(9) { animation-delay: 320ms; }
+.stagger-children > *:nth-child(10) { animation-delay: 360ms; }
