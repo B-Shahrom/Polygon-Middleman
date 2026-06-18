@@ -1,10 +1,15 @@
 import { useState, useEffect } from 'react';
-import { Key, Eye, EyeOff, CheckCircle2, ExternalLink } from 'lucide-react';
+import { Key, Eye, EyeOff, CheckCircle2, ExternalLink, ToggleLeft, ToggleRight } from 'lucide-react';
 import { api } from '../api/client';
 import { useApp } from '../context/AppContext';
 import Button from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
 import Card from '../components/ui/Card';
+
+interface DefaultSettings {
+  enable_groups: boolean;
+  enable_points: boolean;
+}
 
 export default function SettingsPage() {
   const { toast, setCredentialsSet } = useApp();
@@ -14,6 +19,10 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
+  // Default problem settings
+  const [defaults, setDefaults] = useState<DefaultSettings>({ enable_groups: true, enable_points: true });
+  const [savingDefaults, setSavingDefaults] = useState(false);
+
   useEffect(() => {
     api.credentials.get().then((res) => {
       if (res.api_key) {
@@ -21,7 +30,24 @@ export default function SettingsPage() {
         setCredentialsSet(res.has_secret);
       }
     }).catch(() => {});
+    api.settings.get().then(setDefaults).catch(() => {});
   }, [setCredentialsSet]);
+
+  const toggleDefault = async (key: keyof DefaultSettings) => {
+    const newValue = !defaults[key];
+    const updated = { ...defaults, [key]: newValue };
+    setDefaults(updated);
+    setSavingDefaults(true);
+    try {
+      await api.settings.update({ [key]: newValue });
+      toast('success', `${key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())} ${newValue ? 'enabled' : 'disabled'} by default`);
+    } catch {
+      setDefaults(defaults); // revert
+      toast('error', 'Failed to save setting');
+    } finally {
+      setSavingDefaults(false);
+    }
+  };
 
   const handleSave = async () => {
     if (!apiKey.trim() || !apiSecret.trim()) {
@@ -113,6 +139,37 @@ export default function SettingsPage() {
                 </span>
               )}
             </div>
+          </div>
+        </Card>
+
+        {/* Default Problem Settings */}
+        <Card title="Default Problem Settings">
+          <div className="space-y-1">
+            <p className="text-xs text-gray-500 mb-4">
+              These settings are automatically applied when opening a problem's Tests tab.
+            </p>
+
+            {([
+              { key: 'enable_groups' as const, label: 'Enable Groups', desc: 'Auto-enable test groups on Polygon when opening a problem' },
+              { key: 'enable_points' as const, label: 'Enable Points', desc: 'Auto-enable points scoring on Polygon when opening a problem' },
+            ]).map(({ key, label, desc }) => (
+              <button
+                key={key}
+                onClick={() => toggleDefault(key)}
+                disabled={savingDefaults}
+                className="w-full flex items-center justify-between p-3 rounded-lg hover:bg-[#211e1a] transition-colors disabled:opacity-50"
+              >
+                <div className="text-left">
+                  <p className="text-sm font-medium text-gray-200">{label}</p>
+                  <p className="text-xs text-gray-500 mt-0.5">{desc}</p>
+                </div>
+                {defaults[key] ? (
+                  <ToggleRight className="w-6 h-6 text-amber-400 flex-shrink-0" />
+                ) : (
+                  <ToggleLeft className="w-6 h-6 text-gray-600 flex-shrink-0" />
+                )}
+              </button>
+            ))}
           </div>
         </Card>
 

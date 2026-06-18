@@ -20,11 +20,11 @@ def _log_request(method: str, params: dict, files: dict | None = None):
     file_info = ""
     if files:
         file_names = [f"{k} ({fn})" for k, (fn, _, _) in files.items()]
-        file_info = f"  📎 files: {', '.join(file_names)}"
+        file_info = f"  files: {', '.join(file_names)}"
     # Filter out noisy/internal params
     display = {k: v for k, v in params.items() if k not in ("apiKey", "apiSig", "time")}
     param_str = ", ".join(f"{k}={v}" for k, v in display.items()) if display else "(none)"
-    print(f"\n⏩ [{ts}] {method}")
+    print(f"\n>> [{ts}] {method}")
     print(f"   params: {param_str}{file_info}")
 
 
@@ -37,23 +37,23 @@ def _log_response(method: str, body: bytes, content_type: str):
         if status == "OK":
             result = data.get("result")
             if isinstance(result, list):
-                print(f"✅ [{ts}] {method} → OK ({len(result)} items)")
+                print(f"OK [{ts}] {method} -> OK ({len(result)} items)")
             elif isinstance(result, dict):
-                print(f"✅ [{ts}] {method} → OK (object)")
+                print(f"OK [{ts}] {method} -> OK (object)")
             elif result is not None:
-                print(f"✅ [{ts}] {method} → OK: {str(result)[:120]}")
+                print(f"OK [{ts}] {method} -> OK: {str(result)[:120]}")
             else:
-                print(f"✅ [{ts}] {method} → OK")
+                print(f"OK [{ts}] {method} -> OK")
         else:
             comment = data.get("comment", "Unknown error")
-            print(f"❌ [{ts}] {method} → FAILED: {comment}")
+            print(f"ERR [{ts}] {method} -> FAILED: {comment}")
     except (json.JSONDecodeError, UnicodeDecodeError):
         # Binary response (e.g. file download, package)
         size = len(body)
         if size > 1024:
-            print(f"📦 [{ts}] {method} → {size / 1024:.1f} KB ({content_type})")
+            print(f"BIN [{ts}] {method} -> {size / 1024:.1f} KB ({content_type})")
         else:
-            print(f"📦 [{ts}] {method} → {size} bytes ({content_type})")
+            print(f"BIN [{ts}] {method} -> {size} bytes ({content_type})")
 
 app.add_middleware(
     CORSMiddleware,
@@ -119,6 +119,33 @@ async def set_credentials(request: Request):
 
 @app.get("/health")
 def health():
+    return {"status": "ok"}
+
+
+# ── Default Problem Settings ─────────────────────────────────────────────────
+
+DEFAULT_SETTINGS = {
+    "enable_groups": True,
+    "enable_points": True,
+}
+
+
+@app.get("/settings")
+def get_settings():
+    settings = dict(DEFAULT_SETTINGS)
+    stored = _config.get("default_settings", {})
+    settings.update(stored)
+    return settings
+
+
+@app.post("/settings")
+async def update_settings(request: Request):
+    global _config
+    data = await request.json()
+    if "default_settings" not in _config:
+        _config["default_settings"] = dict(DEFAULT_SETTINGS)
+    _config["default_settings"].update(data)
+    save_config(_config)
     return {"status": "ok"}
 
 

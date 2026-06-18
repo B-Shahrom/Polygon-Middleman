@@ -29,17 +29,7 @@ interface PendingTest {
   description?: string;
 }
 
-/** Extract group number from filename like input_s2_003.txt -> "2" */
-function extractGroupFromFilename(filename: string): string | undefined {
-  const m = filename.match(/_s(\d+)[_\-.]/i);
-  return m ? m[1] : undefined;
-}
-
-/** Extract test index from filename */
-function extractIndexFromFilename(filename: string): number | null {
-  const m = filename.match(/[_\-]?(\d+)[_\-.]/) || filename.match(/^(\d+)/);
-  return m ? parseInt(m[1], 10) : null;
-}
+import { extractGroupFromFilename, extractIndexFromFilename } from '../utils/testParser';
 
 /** Truncate string for preview */
 function truncate(s: string, max: number): string {
@@ -147,14 +137,25 @@ export default function TestsTab({ problemId }: Props) {
 
   useEffect(() => { load(); }, [load]);
 
-  // Auto-enable groups & points on Polygon when tab first loads
+  // Auto-enable groups & points on Polygon based on default settings
   const autoEnabledRef = useRef(false);
   useEffect(() => {
     if (autoEnabledRef.current) return;
     autoEnabledRef.current = true;
-    // Fire-and-forget: ensure both are enabled on Polygon side
-    api.problem.enableGroups(problemId, testset, true).catch(() => {});
-    api.problem.enablePoints(problemId, true).catch(() => {});
+    api.settings.get().then((settings) => {
+      if (settings.enable_groups) {
+        api.problem.enableGroups(problemId, testset, true).catch(() => {});
+      }
+      if (settings.enable_points) {
+        api.problem.enablePoints(problemId, true).catch(() => {});
+      }
+      setGroupsEnabled(settings.enable_groups);
+      setPointsEnabled(settings.enable_points);
+    }).catch(() => {
+      // Fallback: enable both if settings can't be fetched
+      api.problem.enableGroups(problemId, testset, true).catch(() => {});
+      api.problem.enablePoints(problemId, true).catch(() => {});
+    });
   }, [problemId, testset]);
 
   // Lazy-load previews for tests that don't have input inline

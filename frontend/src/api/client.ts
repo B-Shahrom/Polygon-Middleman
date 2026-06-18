@@ -65,6 +65,11 @@ export const api = {
       post('/credentials', { api_key, api_secret, ...(username !== undefined ? { username } : {}) }),
   },
 
+  settings: {
+    get: () => get('/settings') as Promise<{ enable_groups: boolean; enable_points: boolean }>,
+    update: (settings: Record<string, boolean>) => post('/settings', settings),
+  },
+
   // ── Problems ────────────────────────────────────────────────────────────────
 
   problems: {

@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, Info, FileText, FolderOpen, Code2, TestTube2,
-  Shield, ScrollText, Package, BookOpen, GitCommit,
+  ScrollText, Package, BookOpen, GitCommit,
   RefreshCw, Trash2, ExternalLink
 } from 'lucide-react';
 import { api } from '../api/client';
@@ -20,7 +20,6 @@ import StatementTab from '../tabs/StatementTab';
 import FilesTab from '../tabs/FilesTab';
 import SolutionsTab from '../tabs/SolutionsTab';
 import TestsTab from '../tabs/TestsTab';
-import CheckerValidatorTab from '../tabs/CheckerValidatorTab';
 import ScriptTab from '../tabs/ScriptTab';
 import PackagesTab from '../tabs/PackagesTab';
 import TutorialTab from '../tabs/TutorialTab';
@@ -28,7 +27,6 @@ import TutorialTab from '../tabs/TutorialTab';
 const TABS = [
   { id: 'info', label: 'Info', icon: <Info className="w-3.5 h-3.5" /> },
   { id: 'statement', label: 'Statement', icon: <FileText className="w-3.5 h-3.5" /> },
-  { id: 'checker', label: 'Checker / Validator', icon: <Shield className="w-3.5 h-3.5" /> },
   { id: 'solutions', label: 'Solutions', icon: <Code2 className="w-3.5 h-3.5" /> },
   { id: 'tests', label: 'Tests', icon: <TestTube2 className="w-3.5 h-3.5" /> },
   { id: 'files', label: 'Files', icon: <FolderOpen className="w-3.5 h-3.5" /> },
@@ -46,7 +44,6 @@ export default function ProblemPage() {
   const [problemInfo, setProblemInfo] = useState<ProblemInfo | null>(null);
   const [activeTab, setActiveTab] = useState('info');
   const [loading, setLoading] = useState(true);
-  const [mountedTabs, setMountedTabs] = useState<Set<string>>(new Set(['info']));
 
   // Commit modal
   const [commitOpen, setCommitOpen] = useState(false);
@@ -57,16 +54,6 @@ export default function ProblemPage() {
   const [discarding, setDiscarding] = useState(false);
 
   const problemId = Number(id);
-
-  const handleTabChange = (tabId: string) => {
-    setActiveTab(tabId);
-    setMountedTabs((prev) => {
-      if (prev.has(tabId)) return prev;
-      const next = new Set(prev);
-      next.add(tabId);
-      return next;
-    });
-  };
 
   const loadProblem = async () => {
     setLoading(true);
@@ -169,13 +156,9 @@ export default function ProblemPage() {
                 </>
               )}
             </div>
-            {problemInfo && (
-              <div className="flex items-center gap-3 mt-1 text-xs text-gray-600 flex-wrap">
-                <span>⏱ {problemInfo.timeLimit}ms</span>
-                <span>💾 {problemInfo.memoryLimit}MB</span>
-                {problemInfo.inputFile && <span>📥 {problemInfo.inputFile}</span>}
-                {problemInfo.outputFile && <span>📤 {problemInfo.outputFile}</span>}
-                {problemInfo.interactive && <Badge variant="info" className="text-xs">Interactive</Badge>}
+            {problemInfo?.interactive && (
+              <div className="flex items-center gap-3 mt-1">
+                <Badge variant="info" className="text-xs">Interactive</Badge>
               </div>
             )}
           </div>
@@ -222,56 +205,35 @@ export default function ProblemPage() {
         </div>
 
         {/* Tabs */}
-        <Tabs tabs={TABS} active={activeTab} onChange={handleTabChange} className="px-5" />
+        <Tabs tabs={TABS} active={activeTab} onChange={setActiveTab} className="px-5" />
       </div>
 
-      {/* Tab content — all visited tabs stay mounted, hidden via CSS */}
+      {/* Tab content — all tabs mounted immediately, hidden via CSS */}
       <div className="flex-1 overflow-y-auto">
-        {mountedTabs.has('info') && (
-          <div style={{ display: activeTab === 'info' ? 'block' : 'none' }}>
-            <InfoTab problemId={problemId} info={problemInfo} onUpdated={loadProblem} />
-          </div>
-        )}
-        {mountedTabs.has('statement') && (
-          <div style={{ display: activeTab === 'statement' ? 'block' : 'none' }}>
-            <StatementTab problemId={problemId} />
-          </div>
-        )}
-        {mountedTabs.has('checker') && (
-          <div style={{ display: activeTab === 'checker' ? 'block' : 'none' }}>
-            <CheckerValidatorTab problemId={problemId} />
-          </div>
-        )}
-        {mountedTabs.has('solutions') && (
-          <div style={{ display: activeTab === 'solutions' ? 'block' : 'none' }}>
-            <SolutionsTab problemId={problemId} />
-          </div>
-        )}
-        {mountedTabs.has('tests') && (
-          <div style={{ display: activeTab === 'tests' ? 'block' : 'none' }}>
-            <TestsTab problemId={problemId} />
-          </div>
-        )}
-        {mountedTabs.has('files') && (
-          <div style={{ display: activeTab === 'files' ? 'block' : 'none' }}>
-            <FilesTab problemId={problemId} />
-          </div>
-        )}
-        {mountedTabs.has('script') && (
-          <div style={{ display: activeTab === 'script' ? 'block' : 'none' }}>
-            <ScriptTab problemId={problemId} />
-          </div>
-        )}
-        {mountedTabs.has('packages') && (
-          <div style={{ display: activeTab === 'packages' ? 'block' : 'none' }}>
-            <PackagesTab problemId={problemId} />
-          </div>
-        )}
-        {mountedTabs.has('tutorial') && (
-          <div style={{ display: activeTab === 'tutorial' ? 'block' : 'none' }}>
-            <TutorialTab problemId={problemId} />
-          </div>
-        )}
+        <div style={{ display: activeTab === 'info' ? 'block' : 'none' }}>
+          <InfoTab problemId={problemId} info={problemInfo} onUpdated={loadProblem} />
+        </div>
+        <div style={{ display: activeTab === 'statement' ? 'block' : 'none' }}>
+          <StatementTab problemId={problemId} />
+        </div>
+        <div style={{ display: activeTab === 'solutions' ? 'block' : 'none' }}>
+          <SolutionsTab problemId={problemId} />
+        </div>
+        <div style={{ display: activeTab === 'tests' ? 'block' : 'none' }}>
+          <TestsTab problemId={problemId} />
+        </div>
+        <div style={{ display: activeTab === 'files' ? 'block' : 'none' }}>
+          <FilesTab problemId={problemId} />
+        </div>
+        <div style={{ display: activeTab === 'script' ? 'block' : 'none' }}>
+          <ScriptTab problemId={problemId} />
+        </div>
+        <div style={{ display: activeTab === 'packages' ? 'block' : 'none' }}>
+          <PackagesTab problemId={problemId} />
+        </div>
+        <div style={{ display: activeTab === 'tutorial' ? 'block' : 'none' }}>
+          <TutorialTab problemId={problemId} />
+        </div>
       </div>
 
       {/* Commit Modal */}

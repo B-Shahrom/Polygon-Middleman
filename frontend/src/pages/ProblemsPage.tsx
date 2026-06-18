@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Plus, Search, RefreshCw, Star, Lock, Edit3, Eye,
-  AlertCircle, Upload, ChevronLeft, ChevronRight
+  AlertCircle, Upload, ChevronLeft, ChevronRight, Archive
 } from 'lucide-react';
 import { api, ApiError } from '../api/client';
 import { useApp } from '../context/AppContext';
@@ -12,6 +12,7 @@ import Badge from '../components/ui/Badge';
 import Modal from '../components/ui/Modal';
 import { Input } from '../components/ui/Input';
 import UploadWizard from '../wizard/UploadWizard';
+import ZipImport from '../wizard/ZipImport';
 
 export default function ProblemsPage() {
   const navigate = useNavigate();
@@ -23,6 +24,7 @@ export default function ProblemsPage() {
   const [newName, setNewName] = useState('');
   const [creating, setCreating] = useState(false);
   const [wizardOpen, setWizardOpen] = useState(false);
+  const [zipImportOpen, setZipImportOpen] = useState(false);
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(20);
 
@@ -127,6 +129,15 @@ export default function ProblemsPage() {
               disabled={!credentialsSet}
             >
               Refresh
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              icon={<Archive className="w-4 h-4" />}
+              onClick={() => setZipImportOpen(true)}
+              disabled={!credentialsSet}
+            >
+              Import ZIP
             </Button>
             <Button
               variant="secondary"
@@ -329,6 +340,9 @@ export default function ProblemsPage() {
 
       {/* Upload Wizard */}
       <UploadWizard open={wizardOpen} onClose={() => setWizardOpen(false)} />
+
+      {/* ZIP Import */}
+      <ZipImport open={zipImportOpen} onClose={() => setZipImportOpen(false)} />
     </div>
   );
 }
