@@ -69,6 +69,22 @@ Then open [http://localhost:5173](http://localhost:5173)
 2. Return to **Problems** — list loads automatically
 3. Use **Import ZIP** for one-click batch import, **Upload Wizard** for a guided flow, or click a problem to manage it
 
+## Develop in the Cloud (GitHub Codespaces)
+
+This repo ships a [`.devcontainer`](.devcontainer/devcontainer.json) so you can work from any device with zero local setup. On GitHub, click **Code → Codespaces → Create codespace on main**. The container installs Python deps (into `backend/venv`) and `npm install`s the frontend automatically.
+
+Inside the Codespace (Linux — `start.bat` is Windows-only, so run the servers directly):
+
+```bash
+# Terminal 1 — backend
+backend/venv/bin/uvicorn main:app --reload --port 8000 --app-dir backend
+
+# Terminal 2 — frontend
+npm --prefix frontend run dev
+```
+
+Port **5173** opens a preview automatically; **8000** is forwarded for the API. Because `backend/config.json` is gitignored, re-enter your Polygon credentials in **Settings** the first time (each Codespace is a fresh environment).
+
 ## Project Structure
 
 ```

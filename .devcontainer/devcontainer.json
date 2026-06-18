@@ -1,0 +1,24 @@
+{
+  "name": "Polygon Middleman",
+  "image": "mcr.microsoft.com/devcontainers/python:3.12-bookworm",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "20"
+    }
+  },
+  "forwardPorts": [8000, 5173],
+  "portsAttributes": {
+    "8000": { "label": "Backend (FastAPI)", "onAutoForward": "notify" },
+    "5173": { "label": "Frontend (Vite)", "onAutoForward": "openPreview" }
+  },
+  "postCreateCommand": "python3 -m venv backend/venv && backend/venv/bin/pip install --upgrade pip && backend/venv/bin/pip install -r backend/requirements.txt && npm --prefix frontend install",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "dbaeumer.vscode-eslint",
+        "bradlc.vscode-tailwindcss"
+      ]
+    }
+  }
+}
