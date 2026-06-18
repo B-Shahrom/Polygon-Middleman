@@ -128,8 +128,11 @@ For every problem the importer runs an isolated pipeline:
 5. Uploads `solution.cpp` tagged `MA` (main correct)
 6. Enables groups and points, then uploads grouped tests
 7. Sets every group's points policy to `COMPLETE_GROUP`, makes the **last group depend on all other groups**, and — if the statement has no scoring section — assigns **100 points** to the last group
+8. **Commits** the changes and requests **verification** via `buildPackage(verify=true)`, which invokes every solution on every test (and the checker on stress tests) to confirm the tags are valid
 
-Imports are **fault-isolated**: a failing step is logged in red and the pipeline continues; a failing problem is skipped and the rest of the batch keeps going. A per-problem summary is shown at the end. Changes are **not** auto-committed — review them on Polygon first.
+> The commit is required because the Polygon API can only verify a *committed* revision — the web UI's working-copy "Verify" button is not exposed as an API method.
+
+Imports are **fault-isolated**: a failing step is logged in red and the pipeline continues; a failing problem is skipped and the rest of the batch keeps going. A per-problem summary is shown at the end.
 
 ### Multi-Language Splitting
 

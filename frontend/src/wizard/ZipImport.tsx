@@ -285,6 +285,20 @@ export default function ZipImport({ open, onClose }: Props) {
       });
     }
 
+    // 9. Commit — required because the API can only verify a committed revision
+    //    (Polygon's working-copy "Verify" button is not exposed via the API).
+    await step('Committing changes...', async () => {
+      await api.problem.commitChanges(pid, { message: 'Import via Polygon Middleman' });
+      return 'Changes committed';
+    });
+
+    // 10. Request verification (buildPackage with verify=true runs all solutions
+    //     on all tests and the checker on stress tests to confirm tags are valid)
+    await step('Requesting verification (build package)...', async () => {
+      await api.problem.buildPackage(pid, false, true);
+      return 'Verification build requested';
+    });
+
     return { failed: false, errors };
   };
 
