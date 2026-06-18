@@ -5,6 +5,7 @@ A full-featured desktop web application for uploading and managing competitive p
 ## Features
 
 - **Problem Management**: Create, edit, and manage problems from a single dashboard
+- **One-Click ZIP Import**: Import one or many fully-structured problem ZIPs in a single batch — auto-creates the problem, uploads the statement, checker, solution, and grouped tests, and configures subtask policies
 - **Batch Test Upload**: Upload tests from ZIP files with auto-parsing of groups and indices
 - **Multi-Language Statements**: Split a single LaTeX block into English, Russian, Tajik, and Uzbek
 - **Solution Management**: Upload, view, delete with 12 tag types
@@ -66,7 +67,7 @@ Then open [http://localhost:5173](http://localhost:5173)
 
 1. Go to **Settings** and enter your Polygon API credentials
 2. Return to **Problems** — list loads automatically
-3. Use **Upload Wizard** or click a problem to manage it
+3. Use **Import ZIP** for one-click batch import, **Upload Wizard** for a guided flow, or click a problem to manage it
 
 ## Project Structure
 
@@ -80,8 +81,9 @@ Polygon_Middleman/
 ├── frontend/
 │   ├── src/
 │   │   ├── pages/           # Main pages
-│   │   ├── tabs/            # 10 problem detail tabs
-│   │   ├── wizard/          # 8-step wizard
+│   │   ├── tabs/            # Problem detail tabs
+│   │   ├── wizard/          # Upload Wizard + ZIP Import
+│   │   ├── utils/           # Statement & test parsers
 │   │   ├── components/ui/   # UI components
 │   │   └── api/client.ts    # Typed API client
 │   └── package.json
@@ -101,6 +103,33 @@ Polygon_Middleman/
 **And more**: Script, Tags, Tutorial, Packages, Contest
 
 ## Key Features
+
+### ZIP Import (Batch)
+
+Click **Import ZIP** on the Problems page and select one or more `.zip` files. Each ZIP holds a single problem:
+
+```
+edu-problem-name/
+├── problem_statement.mdx   # 4-language statement (\textbf{English} … markers)
+├── checker.cpp
+├── solution.cpp
+└── testset/                # also accepts the "tesset/" spelling
+    ├── input_s0_idx0.txt    # group 0 = samples (useInStatements)
+    ├── input_s1_idx0.txt    # group N from the _sN_ in the filename
+    └── ...
+```
+
+For every problem the importer runs an isolated pipeline:
+
+1. Creates the problem using the **full folder name as the slug** (the `edu-` prefix is kept)
+2. Sets defaults — 1000 ms time limit, 256 MB memory, `stdin`/`stdout`
+3. Saves a statement per detected language
+4. Uploads `checker.cpp` and sets it as the checker
+5. Uploads `solution.cpp` tagged `MA` (main correct)
+6. Enables groups and points, then uploads grouped tests
+7. Sets every group's points policy to `COMPLETE_GROUP`, makes the **last group depend on all other groups**, and — if the statement has no scoring section — assigns **100 points** to the last group
+
+Imports are **fault-isolated**: a failing step is logged in red and the pipeline continues; a failing problem is skipped and the rest of the batch keeps going. A per-problem summary is shown at the end. Changes are **not** auto-committed — review them on Polygon first.
 
 ### Multi-Language Splitting
 
