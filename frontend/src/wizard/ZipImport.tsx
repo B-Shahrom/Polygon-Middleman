@@ -207,30 +207,31 @@ export default function ZipImport({ open, onClose }: Props) {
       return 'Groups & points enabled';
     });
 
-    // 7. Upload tests
+    // 7. Upload tests — every index 1..N MUST land or the testset enumeration
+    //    breaks ("Tests are enumerated incorrectly"). So: retry each test, use
+    //    checkExisting:false (duplicate-content tests must still be written), and
+    //    NEVER silently skip — a permanent failure aborts commit+verify below.
+    let testsComplete = true;
     const allGroups = [...new Set(parsed.tests.map(t => t.group))]
       .sort((a, b) => Number(a) - Number(b));
 
     if (parsed.tests.length > 0) {
       await step(`Uploading ${parsed.tests.length} tests...`, async () => {
-        let uploaded = 0;
+        const failed: number[] = [];
         for (const t of parsed.tests) {
-          try {
-            await api.problem.saveTest({
-              problemId: pid,
-              testset: 'tests',
-              testIndex: t.index,
-              testInput: t.input,
-              testGroup: t.group,
-              testUseInStatements: t.group === '0',
-              checkExisting: true,
-            });
-            uploaded++;
-          } catch {
-            // continue uploading remaining tests
-          }
+          const ok = await saveTestWithRetry(pid, t);
+          if (!ok) failed.push(t.index);
+          await sleep(100); // ease Polygon's per-request rate limit
         }
-        return `${uploaded}/${parsed.tests.length} tests uploaded`;
+        if (failed.length > 0) {
+          testsComplete = false;
+          throw new Error(
+            `${failed.length}/${parsed.tests.length} test(s) failed after retries ` +
+            `(indices ${failed.join(', ')}). Skipping commit & verify to avoid a ` +
+            `gapped testset — re-run the import to fill the gaps.`
+          );
+        }
+        return `${parsed.tests.length}/${parsed.tests.length} tests uploaded`;
       });
     }
 
@@ -271,6 +272,7 @@ export default function ZipImport({ open, onClose }: Props) {
               testInput: targetTest.input,
               testGroup: targetTest.group,
               testPoints: 100,
+              checkExisting: false,
             });
           }
         }
@@ -285,19 +287,27 @@ export default function ZipImport({ open, onClose }: Props) {
       });
     }
 
-    // 9. Commit — required because the API can only verify a committed revision
-    //    (Polygon's working-copy "Verify" button is not exposed via the API).
-    await step('Committing changes...', async () => {
-      await api.problem.commitChanges(pid, { message: 'Import via Polygon Middleman' });
-      return 'Changes committed';
-    });
+    // 9 & 10. Commit + verify — only if the testset is complete. A gapped testset
+    //    would make the verify build fail with "Tests are enumerated incorrectly",
+    //    so we skip both and leave the problem uncommitted for a clean re-import.
+    if (testsComplete) {
+      // Commit — required because the API can only verify a committed revision
+      // (Polygon's working-copy "Verify" button is not exposed via the API).
+      await step('Committing changes...', async () => {
+        await api.problem.commitChanges(pid, { message: 'Import via Polygon Middleman' });
+        return 'Changes committed';
+      });
 
-    // 10. Request verification (buildPackage with verify=true runs all solutions
-    //     on all tests and the checker on stress tests to confirm tags are valid)
-    await step('Requesting verification (build package)...', async () => {
-      await api.problem.buildPackage(pid, false, true);
-      return 'Verification build requested';
-    });
+      // buildPackage with verify=true runs all solutions on all tests and the
+      // checker on stress tests to confirm the tags are valid.
+      await step('Requesting verification (build package)...', async () => {
+        await api.problem.buildPackage(pid, false, true);
+        return 'Verification build requested';
+      });
+    } else {
+      addLog('Skipped commit & verify — testset incomplete (see test error above)', 'error');
+      errors++;
+    }
 
     return { failed: false, errors };
   };
@@ -511,6 +521,38 @@ export default function ZipImport({ open, onClose }: Props) {
       )}
     </Modal>
   );
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Save one test, retrying transient failures (rate limits, heavy payloads).
+ * Uses checkExisting:false so duplicate-content tests are still written at their
+ * assigned index — otherwise Polygon rejects the duplicate and the index is left
+ * empty, corrupting the testset enumeration. Returns true if the test landed.
+ */
+async function saveTestWithRetry(
+  pid: number,
+  t: { index: number; input: string; group: string },
+  retries = 3,
+): Promise<boolean> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      await api.problem.saveTest({
+        problemId: pid,
+        testset: 'tests',
+        testIndex: t.index,
+        testInput: t.input,
+        testGroup: t.group,
+        testUseInStatements: t.group === '0',
+        checkExisting: false,
+      });
+      return true;
+    } catch {
+      if (attempt < retries) await sleep(500 * (attempt + 1)); // linear backoff
+    }
+  }
+  return false;
 }
 
 async function parseZip(zip: JSZip): Promise<ParsedZip> {
