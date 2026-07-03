@@ -130,22 +130,26 @@ Click **Import ZIP** on the Problems page and select one or more `.zip` files. E
 edu-problem-name/           # the folder name becomes the Polygon slug
 ├── problem_statement.mdx   # 4-language statement (\textbf{English} … markers)
 ├── checker.cpp
-├── solution.cpp
+├── solution.cpp            # main correct → tagged MA
+├── validator.cpp           # optional → set as validator
+├── wa_*.cpp / tle_*.cpp    # optional extra solutions, tagged by prefix
 └── testset/                # also accepts the "tesset/" spelling
     ├── input_s0_idx0.txt    # group 0 = samples (useInStatements)
     ├── input_s1_idx0.txt    # group N from the _sN_ in the filename
     └── ...
 ```
 
-**Strict reading** — the importer only reads exactly these components: `problem_statement.mdx` (or `.tex`), `checker.cpp`, `solution.cpp`, and `input*.txt` files inside `testset/`. Any other files/folders in the archive (editorials, generators, `.DS_Store`, answer files, etc.) are ignored.
+**Strict reading** — the importer only reads these components: `problem_statement.mdx` (or `.tex`), `checker.cpp`, `solution.cpp`, an optional `validator.cpp`, optional extra solutions (`.cpp` whose name starts with a tag prefix — `wa`, `tle`/`tl`/`slow`, `mle`/`ml`, `re`/`rte`, `pe`, `to`, `tm`, `ok`/`ac`/`brute`), and `input*.txt` files inside `testset/`. Everything else (editorials, generators, `.DS_Store`, answer files, etc.) is ignored.
+
+**Pre-flight validation** — the preview screen flags problems before upload: missing checker/solution/tests/languages, **non-contiguous test groups** (e.g. 0,1,3 — missing 2), and scoring tables that reference groups without tests. You can also **edit the slug, time limit and memory limit per ZIP, or skip a problem**, right in the preview. A local **import history** (with Polygon links and copyable IDs) persists across sessions.
 
 For every problem the importer runs an isolated pipeline:
 
-1. Creates the problem using the **full folder name as the slug** (the `edu-` prefix is kept)
-2. Sets defaults — 1000 ms time limit, 256 MB memory, `stdin`/`stdout`
+1. Creates the problem using the **full folder name as the slug** (the `edu-` prefix is kept), or a per-ZIP override
+2. Sets limits — 1000 ms / 256 MB by default, or per-ZIP overrides — with `stdin`/`stdout`
 3. Saves a statement per detected language
-4. Uploads `checker.cpp` and sets it as the checker
-5. Uploads `solution.cpp` tagged `MA` (main correct)
+4. Uploads `checker.cpp` (and `validator.cpp` if present) and sets them
+5. Uploads `solution.cpp` tagged `MA`, plus any extra solutions with their prefix-detected tags (`WA`, `TL`, …)
 6. Enables groups and points, then uploads grouped tests (each test retried; duplicate-content tests still written so the `1..N` enumeration never gaps)
 7. Sets every group's points policy to `COMPLETE_GROUP`, then:
    - **If the statement has a scoring section** — auto-runs **Derive Dependencies** and **Derive Points**, parsing the scoring table for per-group dependencies and points.

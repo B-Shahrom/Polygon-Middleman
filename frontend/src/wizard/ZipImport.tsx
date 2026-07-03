@@ -1,6 +1,7 @@
 import { useState, useRef } from 'react';
 import {
   Archive, Upload, CheckCircle2, Loader2, X, AlertCircle, Copy, RotateCcw,
+  History, Trash2, ExternalLink,
 } from 'lucide-react';
 import JSZip from 'jszip';
 import { api } from '../api/client';
@@ -13,29 +14,44 @@ import {
   deriveDependenciesFromScoring, derivePointsFromScoring,
 } from '../utils/statementParser';
 import { extractGroupFromFilename } from '../utils/testParser';
+import {
+  loadImportHistory, appendImportHistory, clearImportHistory, ImportHistoryEntry,
+} from '../utils/importHistory';
 
 interface Props {
   open: boolean;
   onClose: () => void;
 }
 
+interface ExtraSolution { filename: string; code: string; tag: string }
+
 interface ParsedZip {
   problemName: string;
   displayName: string;
   languages: Record<string, ParsedSections>;
   checkerCode: string | null;
+  validatorCode: string | null;
   solutionCode: string | null;
+  extraSolutions: ExtraSolution[];
   tests: { index: number; input: string; group: string; filename: string }[];
   hasScoring: boolean;
   scoringText: string;
+  warnings: string[];
 }
 
 interface LogEntry { text: string; status: 'pending' | 'running' | 'done' | 'error'; kind?: 'header' }
+
+/** Per-problem, user-editable overrides applied at import time. */
+interface ImportOpts { slug: string; timeLimit: number; memoryLimit: number }
 
 interface ParsedItem {
   fileName: string;
   parsed: ParsedZip | null;
   parseError?: string;
+  skip: boolean;
+  slug: string;         // editable Polygon slug (defaults to folder name)
+  timeLimit: number;    // ms
+  memoryLimit: number;  // MB
 }
 
 interface ImportResult {
@@ -46,6 +62,7 @@ interface ImportResult {
   errors: number;
   failed?: boolean;
   parsed: ParsedZip;
+  opts: ImportOpts;
 }
 
 type Phase = 'select' | 'preview' | 'uploading' | 'done';
@@ -60,6 +77,11 @@ export default function ZipImport({ open, onClose }: Props) {
   const [log, setLog] = useState<LogEntry[]>([]);
   const [importing, setImporting] = useState(false);
   const [results, setResults] = useState<ImportResult[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
+  const [history, setHistory] = useState<ImportHistoryEntry[]>(() => loadImportHistory());
+
+  const updateItem = (idx: number, patch: Partial<ParsedItem>) =>
+    setItems((prev) => prev.map((it, i) => (i === idx ? { ...it, ...patch } : it)));
 
   const addLog = (text: string, status: LogEntry['status'] = 'pending', kind?: 'header') =>
     setLog((prev) => [...prev, { text, status, kind }]);
@@ -98,12 +120,23 @@ export default function ZipImport({ open, onClose }: Props) {
       try {
         const zip = await JSZip.loadAsync(file);
         const result = await parseZip(zip);
-        parsedItems.push({ fileName: file.name, parsed: result });
+        parsedItems.push({
+          fileName: file.name,
+          parsed: result,
+          skip: false,
+          slug: result.problemName,
+          timeLimit: 1000,
+          memoryLimit: 256,
+        });
       } catch (err) {
         parsedItems.push({
           fileName: file.name,
           parsed: null,
           parseError: err instanceof Error ? err.message : 'Failed to parse ZIP',
+          skip: false,
+          slug: '',
+          timeLimit: 1000,
+          memoryLimit: 256,
         });
       }
     }
@@ -117,7 +150,7 @@ export default function ZipImport({ open, onClose }: Props) {
   };
 
   // Upload a single parsed problem. Returns step-level errors + the problem id.
-  const importProblem = async (parsed: ParsedZip): Promise<{ failed: boolean; errors: number; problemId?: number }> => {
+  const importProblem = async (parsed: ParsedZip, opts: ImportOpts): Promise<{ failed: boolean; errors: number; problemId?: number }> => {
     let errors = 0;
 
     const step = async (label: string, fn: () => Promise<string | void>) => {
@@ -133,14 +166,14 @@ export default function ZipImport({ open, onClose }: Props) {
 
     // 1. Create problem (fatal for THIS problem — skip the rest of its steps if it fails)
     let problemId: number | undefined;
-    addLog(`Creating problem "${parsed.problemName}"...`, 'running');
+    addLog(`Creating problem "${opts.slug}"...`, 'running');
     try {
-      const createRes = await api.problems.create(parsed.problemName) as { result?: Problem };
+      const createRes = await api.problems.create(opts.slug) as { result?: Problem };
       problemId = createRes.result?.id;
       if (!problemId) {
         const listRes = await api.problems.list({}) as { result?: unknown };
         const all: Problem[] = Array.isArray((listRes as { result?: unknown }).result) ? (listRes as { result: Problem[] }).result : [];
-        const target = parsed.problemName;
+        const target = opts.slug;
         const found =
           all.find((p) => p.name === target) ??
           all.find((p) => p.name.toLowerCase() === target.toLowerCase());
@@ -156,14 +189,14 @@ export default function ZipImport({ open, onClose }: Props) {
     const pid = problemId;
 
     // 2. Update info
-    await step('Setting problem info (TL=1000ms, ML=256MB)...', async () => {
+    await step(`Setting problem info (TL=${opts.timeLimit}ms, ML=${opts.memoryLimit}MB)...`, async () => {
       await api.problem.updateInfo({
         problemId: pid,
         inputFile: 'stdin',
         outputFile: 'stdout',
         interactive: false,
-        timeLimit: 1000,
-        memoryLimit: 256,
+        timeLimit: opts.timeLimit,
+        memoryLimit: opts.memoryLimit,
       });
       return 'Problem info set';
     });
@@ -202,13 +235,45 @@ export default function ZipImport({ open, onClose }: Props) {
       });
     }
 
-    // 5. Upload solution
+    // 4b. Upload validator (optional)
+    if (parsed.validatorCode) {
+      await step('Uploading validator.cpp...', async () => {
+        const vBlob = new Blob([parsed.validatorCode!], { type: 'text/plain' });
+        const vFile = new File([vBlob], 'validator.cpp', { type: 'text/plain' });
+        await api.problem.saveFile(pid, 'source', 'validator.cpp', vFile, 'cpp.g++17');
+        await api.problem.setValidator(pid, 'validator.cpp');
+        return 'Validator uploaded & set';
+      });
+    }
+
+    // 5. Upload main solution (always solution.cpp → MA)
     if (parsed.solutionCode) {
       await step('Uploading solution.cpp [MA]...', async () => {
         const solBlob = new Blob([parsed.solutionCode!], { type: 'text/plain' });
         const solFile = new File([solBlob], 'solution.cpp', { type: 'text/plain' });
         await api.problem.saveSolution(pid, 'solution.cpp', solFile, 'MA', 'cpp.g++17');
         return 'Solution uploaded (MA)';
+      });
+    }
+
+    // 5b. Upload extra solutions with their detected tags (WA/TL/ML/RE/…)
+    if (parsed.extraSolutions.length > 0) {
+      await step(`Uploading ${parsed.extraSolutions.length} extra solution(s)...`, async () => {
+        let uploaded = 0;
+        const labels: string[] = [];
+        for (const s of parsed.extraSolutions) {
+          try {
+            const blob = new Blob([s.code], { type: 'text/plain' });
+            const file = new File([blob], s.filename, { type: 'text/plain' });
+            await api.problem.saveSolution(pid, s.filename, file, s.tag, 'cpp.g++17');
+            uploaded++;
+            labels.push(`${s.filename} [${s.tag}]`);
+          } catch {
+            // continue with the rest
+          }
+        }
+        if (uploaded === 0) throw new Error('all extra solutions failed');
+        return `Extra solutions: ${labels.join(', ')}`;
       });
     }
 
@@ -351,16 +416,16 @@ export default function ZipImport({ open, onClose }: Props) {
   };
 
   // Run the pipeline for one parsed problem, logging a header + returning a result.
-  const runImportFor = async (parsed: ParsedZip, headerLabel: string): Promise<ImportResult> => {
+  const runImportFor = async (parsed: ParsedZip, opts: ImportOpts, headerLabel: string): Promise<ImportResult> => {
     addLog(headerLabel, 'running', 'header');
     try {
-      const { failed, errors, problemId } = await importProblem(parsed);
+      const { failed, errors, problemId } = await importProblem(parsed, opts);
       updateHeader(parsed.displayName, failed || errors > 0 ? 'error' : 'done');
-      return { name: parsed.displayName, slug: parsed.problemName, problemId, ok: !failed && errors === 0, errors, failed, parsed };
+      return { name: parsed.displayName, slug: opts.slug, problemId, ok: !failed && errors === 0, errors, failed, parsed, opts };
     } catch (err) {
       addLog(`Unexpected error: ${err instanceof Error ? err.message : 'Unknown'}`, 'error');
       updateHeader(parsed.displayName, 'error');
-      return { name: parsed.displayName, slug: parsed.problemName, ok: false, errors: 1, failed: true, parsed };
+      return { name: parsed.displayName, slug: opts.slug, ok: false, errors: 1, failed: true, parsed, opts };
     }
   };
 
@@ -375,8 +440,20 @@ export default function ZipImport({ open, onClose }: Props) {
     }
   };
 
+  // Persist a run's outcomes to the local import history.
+  const recordHistory = (rs: ImportResult[]) => {
+    const entries: ImportHistoryEntry[] = rs.map(r => ({
+      ts: Date.now(),
+      name: r.name,
+      slug: r.slug,
+      problemId: r.problemId,
+      status: r.failed ? 'failed' : r.ok ? 'imported' : 'warnings',
+    }));
+    setHistory(appendImportHistory(entries));
+  };
+
   const handleImport = async () => {
-    const toImport = items.filter(i => i.parsed);
+    const toImport = items.filter(i => i.parsed && !i.skip);
     if (toImport.length === 0) return;
 
     setPhase('uploading');
@@ -385,11 +462,13 @@ export default function ZipImport({ open, onClose }: Props) {
     const runResults: ImportResult[] = [];
 
     for (let i = 0; i < toImport.length; i++) {
-      const parsed = toImport[i].parsed!;
-      runResults.push(await runImportFor(parsed, `Problem ${i + 1}/${toImport.length}: ${parsed.displayName}`));
+      const it = toImport[i];
+      const opts: ImportOpts = { slug: it.slug.trim() || it.parsed!.problemName, timeLimit: it.timeLimit, memoryLimit: it.memoryLimit };
+      runResults.push(await runImportFor(it.parsed!, opts, `Problem ${i + 1}/${toImport.length}: ${it.parsed!.displayName}`));
     }
 
     setResults(runResults);
+    recordHistory(runResults);
     setPhase('done');
     setImporting(false);
     announce(runResults);
@@ -397,7 +476,8 @@ export default function ZipImport({ open, onClose }: Props) {
 
   // Re-run the pipeline for a subset of already-attempted problems (retry).
   // Re-import lands in the SAME Polygon problem (name exists → resolved by
-  // fallback), overwriting/filling whatever was missing.
+  // fallback), overwriting/filling whatever was missing. Reuses each problem's
+  // original overrides.
   const handleRetry = async (targets: ImportResult[]) => {
     const retryable = targets.filter(t => t.parsed);
     if (retryable.length === 0) return;
@@ -405,15 +485,18 @@ export default function ZipImport({ open, onClose }: Props) {
     setPhase('uploading');
     setImporting(true);
     const updated = [...results];
+    const redone: ImportResult[] = [];
 
     for (let i = 0; i < retryable.length; i++) {
-      const parsed = retryable[i].parsed;
-      const res = await runImportFor(parsed, `Retry ${i + 1}/${retryable.length}: ${parsed.displayName}`);
+      const t = retryable[i];
+      const res = await runImportFor(t.parsed, t.opts, `Retry ${i + 1}/${retryable.length}: ${t.parsed.displayName}`);
       const idx = updated.findIndex(r => r.name === res.name);
       if (idx >= 0) updated[idx] = res; else updated.push(res);
+      redone.push(res);
     }
 
     setResults(updated);
+    recordHistory(redone);
     setPhase('done');
     setImporting(false);
     announce(updated);
@@ -432,6 +515,20 @@ export default function ZipImport({ open, onClose }: Props) {
     }
   };
 
+  const copyHistoryList = async () => {
+    const withIds = history.filter(h => h.problemId);
+    if (withIds.length === 0) { toast('error', 'No problem IDs in history'); return; }
+    const text = withIds.map(h => `${h.problemId}\t${h.slug}\t${h.name}`).join('\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      toast('success', `Copied ${withIds.length} problem ID(s) from history`);
+    } catch {
+      toast('error', 'Clipboard copy failed');
+    }
+  };
+
+  const handleClearHistory = () => { clearImportHistory(); setHistory([]); };
+
   const failedResults = results.filter(r => !r.ok);
 
   // Mark a header entry done/error once its problem finishes
@@ -449,6 +546,7 @@ export default function ZipImport({ open, onClose }: Props) {
 
   const okCount = items.filter(i => i.parsed).length;
   const badCount = items.length - okCount;
+  const importCount = items.filter(i => i.parsed && !i.skip).length;
 
   return (
     <Modal
@@ -458,12 +556,17 @@ export default function ZipImport({ open, onClose }: Props) {
       size="lg"
       footer={
         phase === 'select' ? (
-          <Button variant="ghost" onClick={handleClose}>Cancel</Button>
+          <>
+            <Button variant="ghost" icon={<History className="w-4 h-4" />} onClick={() => setShowHistory(v => !v)}>
+              History{history.length > 0 ? ` (${history.length})` : ''}
+            </Button>
+            <Button variant="ghost" onClick={handleClose}>Cancel</Button>
+          </>
         ) : phase === 'preview' ? (
           <>
             <Button variant="ghost" onClick={() => { setItems([]); setPhase('select'); }}>Back</Button>
-            <Button variant="primary" icon={<Upload className="w-4 h-4" />} onClick={handleImport} disabled={okCount === 0}>
-              Import {okCount} Problem{okCount !== 1 ? 's' : ''}
+            <Button variant="primary" icon={<Upload className="w-4 h-4" />} onClick={handleImport} disabled={importCount === 0}>
+              Import {importCount} Problem{importCount !== 1 ? 's' : ''}
             </Button>
           </>
         ) : phase === 'done' ? (
@@ -483,7 +586,50 @@ export default function ZipImport({ open, onClose }: Props) {
         ) : null
       }
     >
-      {phase === 'select' && (
+      {phase === 'select' && showHistory && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-gray-200">Import History</h3>
+            <div className="flex items-center gap-2">
+              <Button variant="ghost" size="sm" icon={<Copy className="w-3.5 h-3.5" />} onClick={copyHistoryList} disabled={history.length === 0}>
+                Copy IDs
+              </Button>
+              <Button variant="ghost" size="sm" icon={<Trash2 className="w-3.5 h-3.5" />} onClick={handleClearHistory} disabled={history.length === 0}>
+                Clear
+              </Button>
+              <Button variant="secondary" size="sm" onClick={() => setShowHistory(false)}>Back</Button>
+            </div>
+          </div>
+          {history.length === 0 ? (
+            <p className="text-sm text-gray-600">No imports recorded yet.</p>
+          ) : (
+            <div className="space-y-1 max-h-[24rem] overflow-y-auto pr-1">
+              {history.map((h, i) => (
+                <div key={i} className="flex items-center gap-2 text-sm py-1.5 px-2 rounded hover:bg-[#211e1a]">
+                  {h.status === 'imported'
+                    ? <CheckCircle2 className="w-3.5 h-3.5 text-green-400 flex-shrink-0" />
+                    : h.status === 'warnings'
+                      ? <AlertCircle className="w-3.5 h-3.5 text-yellow-400 flex-shrink-0" />
+                      : <X className="w-3.5 h-3.5 text-red-400 flex-shrink-0" />}
+                  <span className="text-gray-300 truncate">{h.name}</span>
+                  {h.problemId && (
+                    <a
+                      href={`https://polygon.codeforces.com/edit-start?problemId=${h.problemId}`}
+                      target="_blank" rel="noreferrer"
+                      className="text-xs font-mono text-amber-400 hover:text-amber-300 flex items-center gap-0.5 flex-shrink-0"
+                    >
+                      #{h.problemId}<ExternalLink className="w-3 h-3" />
+                    </a>
+                  )}
+                  <span className="ml-auto text-xs text-gray-600 flex-shrink-0">{new Date(h.ts).toLocaleString()}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {phase === 'select' && !showHistory && (
         <div className="space-y-4">
           <p className="text-sm text-gray-400">
             Select one or more ZIP files. Each ZIP should contain a single problem with this structure:
@@ -492,7 +638,9 @@ export default function ZipImport({ open, onClose }: Props) {
             <div>edu-problem-name/</div>
             <div className="pl-4">problem_statement.mdx</div>
             <div className="pl-4">checker.cpp</div>
-            <div className="pl-4">solution.cpp</div>
+            <div className="pl-4">solution.cpp<span className="text-gray-600">    # main → MA</span></div>
+            <div className="pl-4">validator.cpp<span className="text-gray-600">   # optional</span></div>
+            <div className="pl-4">wa_*.cpp / tle_*.cpp<span className="text-gray-600">  # optional, tagged by prefix</span></div>
             <div className="pl-4">testset/</div>
             <div className="pl-8">input_s0_idx0.txt</div>
             <div className="pl-8">input_s1_idx0.txt</div>
@@ -532,7 +680,7 @@ export default function ZipImport({ open, onClose }: Props) {
           </p>
           <div className="space-y-2 max-h-[26rem] overflow-y-auto pr-1">
             {items.map((item, idx) => (
-              <div key={idx} className={`border rounded-lg overflow-hidden ${item.parsed ? 'border-[#362f28]' : 'border-red-500/30'}`}>
+              <div key={idx} className={`border rounded-lg overflow-hidden ${!item.parsed ? 'border-red-500/30' : item.skip ? 'border-[#2a251f] opacity-55' : 'border-[#362f28]'}`}>
                 <div className="bg-[#211e1a] px-3 py-2 flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2 min-w-0">
                     {item.parsed
@@ -543,23 +691,84 @@ export default function ZipImport({ open, onClose }: Props) {
                     </span>
                   </div>
                   {item.parsed && (
-                    <span className="text-xs text-gray-600 font-mono flex-shrink-0">{item.parsed.problemName}</span>
+                    <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer select-none flex-shrink-0">
+                      <input
+                        type="checkbox"
+                        checked={item.skip}
+                        onChange={(e) => updateItem(idx, { skip: e.target.checked })}
+                        className="rounded accent-amber-500"
+                      />
+                      Skip
+                    </label>
                   )}
                 </div>
                 {item.parsed ? (
-                  <div className="px-3 py-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
-                    <span className="text-gray-500">
-                      Langs: <span className="text-gray-300 capitalize">{Object.keys(item.parsed.languages).join(', ') || 'none'}</span>
-                    </span>
-                    <span className="text-gray-500">
-                      Tests: <span className="text-gray-300">{item.parsed.tests.length}</span>
-                      {item.parsed.tests.length > 0 && (
-                        <span className="text-gray-600"> (groups {[...new Set(item.parsed.tests.map(t => t.group))].sort((a, b) => Number(a) - Number(b)).join(',')})</span>
+                  <div className="px-3 py-2.5 space-y-2">
+                    {/* Editable overrides */}
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                      <label className="flex items-center gap-1.5 text-xs text-gray-500">
+                        Slug
+                        <input
+                          value={item.slug}
+                          onChange={(e) => updateItem(idx, { slug: e.target.value })}
+                          disabled={item.skip}
+                          className="bg-[#1a1714] border border-[#362f28] rounded px-2 py-1 text-xs font-mono text-gray-200 w-56 focus:outline-none focus:border-amber-500 disabled:opacity-50"
+                        />
+                      </label>
+                      <label className="flex items-center gap-1.5 text-xs text-gray-500">
+                        TL
+                        <input
+                          type="number" min={250} step={250}
+                          value={item.timeLimit}
+                          onChange={(e) => updateItem(idx, { timeLimit: Number(e.target.value) || 1000 })}
+                          disabled={item.skip}
+                          className="bg-[#1a1714] border border-[#362f28] rounded px-2 py-1 text-xs text-gray-200 w-20 focus:outline-none focus:border-amber-500 disabled:opacity-50"
+                        />
+                        <span className="text-gray-600">ms</span>
+                      </label>
+                      <label className="flex items-center gap-1.5 text-xs text-gray-500">
+                        ML
+                        <input
+                          type="number" min={64} step={64}
+                          value={item.memoryLimit}
+                          onChange={(e) => updateItem(idx, { memoryLimit: Number(e.target.value) || 256 })}
+                          disabled={item.skip}
+                          className="bg-[#1a1714] border border-[#362f28] rounded px-2 py-1 text-xs text-gray-200 w-20 focus:outline-none focus:border-amber-500 disabled:opacity-50"
+                        />
+                        <span className="text-gray-600">MB</span>
+                      </label>
+                    </div>
+
+                    {/* Component summary */}
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+                      <span className="text-gray-500">
+                        Langs: <span className="text-gray-300 capitalize">{Object.keys(item.parsed.languages).join(', ') || 'none'}</span>
+                      </span>
+                      <span className="text-gray-500">
+                        Tests: <span className="text-gray-300">{item.parsed.tests.length}</span>
+                        {item.parsed.tests.length > 0 && (
+                          <span className="text-gray-600"> (groups {[...new Set(item.parsed.tests.map(t => t.group))].sort((a, b) => Number(a) - Number(b)).join(',')})</span>
+                        )}
+                      </span>
+                      <span className={item.parsed.checkerCode ? 'text-green-400' : 'text-yellow-400'}>checker {item.parsed.checkerCode ? '✓' : '✗'}</span>
+                      <span className={item.parsed.solutionCode ? 'text-green-400' : 'text-yellow-400'}>solution {item.parsed.solutionCode ? '✓' : '✗'}</span>
+                      {item.parsed.validatorCode && <span className="text-green-400">validator ✓</span>}
+                      {item.parsed.extraSolutions.length > 0 && (
+                        <span className="text-gray-500">+{item.parsed.extraSolutions.length} sol ({item.parsed.extraSolutions.map(s => s.tag).join(',')})</span>
                       )}
-                    </span>
-                    <span className={item.parsed.checkerCode ? 'text-green-400' : 'text-yellow-400'}>checker {item.parsed.checkerCode ? '✓' : '✗'}</span>
-                    <span className={item.parsed.solutionCode ? 'text-green-400' : 'text-yellow-400'}>solution {item.parsed.solutionCode ? '✓' : '✗'}</span>
-                    {!item.parsed.hasScoring && <span className="text-gray-600">no scoring → 100pts on last group</span>}
+                      {!item.parsed.hasScoring && <span className="text-gray-600">no scoring → 100pts on last group</span>}
+                    </div>
+
+                    {/* Validation warnings */}
+                    {item.parsed.warnings.length > 0 && (
+                      <div className="flex flex-col gap-0.5">
+                        {item.parsed.warnings.map((w, wi) => (
+                          <div key={wi} className="flex items-center gap-1.5 text-xs text-yellow-400/90">
+                            <AlertCircle className="w-3 h-3 flex-shrink-0" />{w}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <div className="px-3 py-2 text-xs text-red-400">{item.parseError}</div>
@@ -605,7 +814,15 @@ export default function ZipImport({ open, onClose }: Props) {
                       ? <CheckCircle2 className="w-4 h-4 text-green-400 flex-shrink-0" />
                       : <AlertCircle className="w-4 h-4 text-yellow-400 flex-shrink-0" />}
                   <span className="text-gray-300">{r.name}</span>
-                  {r.problemId && <span className="text-xs font-mono text-gray-500">#{r.problemId}</span>}
+                  {r.problemId && (
+                    <a
+                      href={`https://polygon.codeforces.com/edit-start?problemId=${r.problemId}`}
+                      target="_blank" rel="noreferrer"
+                      className="text-xs font-mono text-amber-400 hover:text-amber-300 flex items-center gap-0.5"
+                    >
+                      #{r.problemId}<ExternalLink className="w-3 h-3" />
+                    </a>
+                  )}
                   <span className="text-xs text-gray-600">
                     {r.failed ? 'failed' : r.ok ? 'imported' : `imported with ${r.errors} warning${r.errors !== 1 ? 's' : ''}`}
                   </span>
@@ -665,6 +882,28 @@ function baseName(p: string): string {
   return (p.split('/').pop() || '').toLowerCase();
 }
 
+// Extra-solution filename → Polygon tag, by leading prefix. Order matters
+// (more specific alternatives first). Main solution stays solution.cpp → MA.
+const SOLUTION_TAG_PREFIXES: [RegExp, string][] = [
+  [/^(wa|wrong)/, 'WA'],
+  [/^(tle|tl|slow)/, 'TL'],
+  [/^(mle|ml)/, 'ML'],
+  [/^(rte|re|runtime)/, 'RE'],
+  [/^(pe|presentation)/, 'PE'],
+  [/^(to)/, 'TO'],
+  [/^(tm)/, 'TM'],
+  [/^(ok|ac|correct|accepted|brute|bf)/, 'OK'],
+];
+
+/** Detect a solution tag from a .cpp basename, or null if it isn't a tagged solution. */
+function detectSolutionTag(base: string): string | null {
+  const name = base.replace(/\.(cpp|cc|cxx)$/i, '');
+  for (const [re, tag] of SOLUTION_TAG_PREFIXES) {
+    if (re.test(name)) return tag;
+  }
+  return null;
+}
+
 /**
  * Locate the slug root folder from a reference file path. Prefers an
  * `edu-<name>/` segment anywhere in the path; otherwise uses the top folder.
@@ -693,6 +932,7 @@ async function parseZip(zip: JSZip): Promise<ParsedZip> {
   const stmtPath = findByName('problem_statement.mdx', 'problem_statement.tex');
   const checkerPath = findByName('checker.cpp');
   const solutionPath = findByName('solution.cpp');
+  const validatorPath = findByName('validator.cpp');
 
   // Slug root folder — derived from a core file so garbage at the top level
   // (loose files/folders next to the real problem folder) is ignored.
@@ -726,10 +966,32 @@ async function parseZip(zip: JSZip): Promise<ParsedZip> {
     checkerCode = await zip.files[checkerPath].async('string');
   }
 
-  // Read solution.cpp
+  // Read validator.cpp (optional)
+  let validatorCode: string | null = null;
+  if (validatorPath) {
+    validatorCode = await zip.files[validatorPath].async('string');
+  }
+
+  // Read solution.cpp (main → MA)
   let solutionCode: string | null = null;
   if (solutionPath) {
     solutionCode = await zip.files[solutionPath].async('string');
+  }
+
+  // Read extra solutions — any *.cpp under the slug root whose basename starts
+  // with a known tag prefix (wa_*, tle_*, …). Core files are excluded. Deduped
+  // by basename (Polygon solution names must be unique).
+  const CORE_CPP = new Set(['checker.cpp', 'solution.cpp', 'validator.cpp']);
+  const extraSolutions: ExtraSolution[] = [];
+  const seenNames = new Set<string>();
+  for (const p of filePaths) {
+    if (rootPrefix && !p.startsWith(rootPrefix)) continue;
+    const b = baseName(p);
+    if (!b.endsWith('.cpp') || CORE_CPP.has(b) || seenNames.has(b)) continue;
+    const tag = detectSolutionTag(b);
+    if (!tag) continue;
+    seenNames.add(b);
+    extraSolutions.push({ filename: b, code: await zip.files[p].async('string'), tag });
   }
 
   // Read tests — ONLY input*.txt files inside a testset/ folder (tesset/ typo
@@ -776,5 +1038,36 @@ async function parseZip(zip: JSZip): Promise<ParsedZip> {
   );
   const hasScoring = scoringText.length > 0;
 
-  return { problemName, displayName, languages, checkerCode, solutionCode, tests, hasScoring, scoringText };
+  // ── Pre-flight validation (advisory warnings; import still allowed) ─────────
+  const warnings: string[] = [];
+  if (Object.keys(languages).length === 0) warnings.push('No statement languages parsed');
+  if (!checkerCode) warnings.push('No checker.cpp found');
+  if (!solutionCode) warnings.push('No solution.cpp (main) found');
+  if (tests.length === 0) warnings.push('No tests found in testset/');
+
+  const groupNums = [...new Set(tests.map(t => Number(t.group)))].sort((a, b) => a - b);
+  if (groupNums.length > 0) {
+    const maxG = groupNums[groupNums.length - 1];
+    const missing: number[] = [];
+    for (let g = 0; g <= maxG; g++) if (!groupNums.includes(g)) missing.push(g);
+    if (missing.length) warnings.push(`Non-contiguous groups — missing ${missing.join(', ')}`);
+  }
+
+  if (hasScoring) {
+    const pts = derivePointsFromScoring(scoringText);
+    const deps = deriveDependenciesFromScoring(scoringText);
+    if (Object.keys(pts).length === 0 && Object.keys(deps).length === 0) {
+      warnings.push('Scoring section present but no points/deps could be parsed');
+    } else {
+      const scoredGroups = new Set([...Object.keys(pts), ...Object.keys(deps)]);
+      const unknown = [...scoredGroups].filter(g => !groupNums.includes(Number(g)));
+      if (unknown.length) warnings.push(`Scoring references group(s) ${unknown.join(', ')} with no tests`);
+    }
+  }
+
+  return {
+    problemName, displayName, languages,
+    checkerCode, validatorCode, solutionCode, extraSolutions,
+    tests, hasScoring, scoringText, warnings,
+  };
 }
