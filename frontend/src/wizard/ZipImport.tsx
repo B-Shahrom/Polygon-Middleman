@@ -1,6 +1,6 @@
 import { useState, useRef } from 'react';
 import {
-  Archive, Upload, CheckCircle2, Loader2, X, AlertCircle,
+  Archive, Upload, CheckCircle2, Loader2, X, AlertCircle, Copy, RotateCcw,
 } from 'lucide-react';
 import JSZip from 'jszip';
 import { api } from '../api/client';
@@ -38,7 +38,15 @@ interface ParsedItem {
   parseError?: string;
 }
 
-interface ImportResult { name: string; ok: boolean; errors: number; failed?: boolean }
+interface ImportResult {
+  name: string;
+  slug: string;
+  problemId?: number;
+  ok: boolean;
+  errors: number;
+  failed?: boolean;
+  parsed: ParsedZip;
+}
 
 type Phase = 'select' | 'preview' | 'uploading' | 'done';
 
@@ -108,8 +116,8 @@ export default function ZipImport({ open, onClose }: Props) {
     if (bad > 0) toast('warning', `Parsed ${ok} ZIP(s); ${bad} could not be read`);
   };
 
-  // Upload a single parsed problem. Returns the number of step-level errors.
-  const importProblem = async (parsed: ParsedZip): Promise<{ failed: boolean; errors: number }> => {
+  // Upload a single parsed problem. Returns step-level errors + the problem id.
+  const importProblem = async (parsed: ParsedZip): Promise<{ failed: boolean; errors: number; problemId?: number }> => {
     let errors = 0;
 
     const step = async (label: string, fn: () => Promise<string | void>) => {
@@ -339,7 +347,32 @@ export default function ZipImport({ open, onClose }: Props) {
       errors++;
     }
 
-    return { failed: false, errors };
+    return { failed: false, errors, problemId: pid };
+  };
+
+  // Run the pipeline for one parsed problem, logging a header + returning a result.
+  const runImportFor = async (parsed: ParsedZip, headerLabel: string): Promise<ImportResult> => {
+    addLog(headerLabel, 'running', 'header');
+    try {
+      const { failed, errors, problemId } = await importProblem(parsed);
+      updateHeader(parsed.displayName, failed || errors > 0 ? 'error' : 'done');
+      return { name: parsed.displayName, slug: parsed.problemName, problemId, ok: !failed && errors === 0, errors, failed, parsed };
+    } catch (err) {
+      addLog(`Unexpected error: ${err instanceof Error ? err.message : 'Unknown'}`, 'error');
+      updateHeader(parsed.displayName, 'error');
+      return { name: parsed.displayName, slug: parsed.problemName, ok: false, errors: 1, failed: true, parsed };
+    }
+  };
+
+  const announce = (rs: ImportResult[]) => {
+    const fullOk = rs.filter(r => r.ok).length;
+    const partial = rs.filter(r => !r.ok && !r.failed).length;
+    const failed = rs.filter(r => r.failed).length;
+    if (failed === 0 && partial === 0) {
+      toast('success', `All ${fullOk} problem(s) imported successfully!`);
+    } else {
+      toast('warning', `Done: ${fullOk} clean, ${partial} with warnings, ${failed} failed — check the log`);
+    }
   };
 
   const handleImport = async () => {
@@ -352,34 +385,54 @@ export default function ZipImport({ open, onClose }: Props) {
     const runResults: ImportResult[] = [];
 
     for (let i = 0; i < toImport.length; i++) {
-      const item = toImport[i];
-      const parsed = item.parsed!;
-      addLog(`Problem ${i + 1}/${toImport.length}: ${parsed.displayName}`, 'running', 'header');
-      try {
-        const { failed, errors } = await importProblem(parsed);
-        updateHeader(parsed.displayName, failed ? 'error' : errors > 0 ? 'error' : 'done');
-        runResults.push({ name: parsed.displayName, ok: !failed && errors === 0, errors, failed });
-      } catch (err) {
-        // Unexpected error in the per-problem pipeline — log and keep going
-        addLog(`Unexpected error: ${err instanceof Error ? err.message : 'Unknown'}`, 'error');
-        updateHeader(parsed.displayName, 'error');
-        runResults.push({ name: parsed.displayName, ok: false, errors: 1, failed: true });
-      }
+      const parsed = toImport[i].parsed!;
+      runResults.push(await runImportFor(parsed, `Problem ${i + 1}/${toImport.length}: ${parsed.displayName}`));
     }
 
     setResults(runResults);
     setPhase('done');
     setImporting(false);
+    announce(runResults);
+  };
 
-    const fullOk = runResults.filter(r => r.ok).length;
-    const partial = runResults.filter(r => !r.ok && !r.failed).length;
-    const failed = runResults.filter(r => r.failed).length;
-    if (failed === 0 && partial === 0) {
-      toast('success', `All ${fullOk} problem(s) imported successfully!`);
-    } else {
-      toast('warning', `Done: ${fullOk} clean, ${partial} with warnings, ${failed} failed — check the log`);
+  // Re-run the pipeline for a subset of already-attempted problems (retry).
+  // Re-import lands in the SAME Polygon problem (name exists → resolved by
+  // fallback), overwriting/filling whatever was missing.
+  const handleRetry = async (targets: ImportResult[]) => {
+    const retryable = targets.filter(t => t.parsed);
+    if (retryable.length === 0) return;
+
+    setPhase('uploading');
+    setImporting(true);
+    const updated = [...results];
+
+    for (let i = 0; i < retryable.length; i++) {
+      const parsed = retryable[i].parsed;
+      const res = await runImportFor(parsed, `Retry ${i + 1}/${retryable.length}: ${parsed.displayName}`);
+      const idx = updated.findIndex(r => r.name === res.name);
+      if (idx >= 0) updated[idx] = res; else updated.push(res);
+    }
+
+    setResults(updated);
+    setPhase('done');
+    setImporting(false);
+    announce(updated);
+  };
+
+  // Copy the imported problems as a paste-friendly "id<TAB>slug<TAB>name" list.
+  const copyImportedList = async () => {
+    const withIds = results.filter(r => r.problemId);
+    if (withIds.length === 0) { toast('error', 'No problem IDs to copy yet'); return; }
+    const text = withIds.map(r => `${r.problemId}\t${r.slug}\t${r.name}`).join('\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      toast('success', `Copied ${withIds.length} problem ID(s) to clipboard`);
+    } catch {
+      toast('error', 'Clipboard copy failed');
     }
   };
+
+  const failedResults = results.filter(r => !r.ok);
 
   // Mark a header entry done/error once its problem finishes
   const updateHeader = (displayName: string, status: LogEntry['status']) =>
@@ -414,7 +467,19 @@ export default function ZipImport({ open, onClose }: Props) {
             </Button>
           </>
         ) : phase === 'done' ? (
-          <Button variant="primary" onClick={handleClose}>Close</Button>
+          <>
+            {results.some(r => r.problemId) && (
+              <Button variant="ghost" icon={<Copy className="w-4 h-4" />} onClick={copyImportedList}>
+                Copy IDs
+              </Button>
+            )}
+            {failedResults.length > 0 && (
+              <Button variant="secondary" icon={<RotateCcw className="w-4 h-4" />} onClick={() => handleRetry(failedResults)}>
+                Retry {failedResults.length} failed
+              </Button>
+            )}
+            <Button variant="primary" onClick={handleClose}>Close</Button>
+          </>
         ) : null
       }
     >
@@ -540,9 +605,19 @@ export default function ZipImport({ open, onClose }: Props) {
                       ? <CheckCircle2 className="w-4 h-4 text-green-400 flex-shrink-0" />
                       : <AlertCircle className="w-4 h-4 text-yellow-400 flex-shrink-0" />}
                   <span className="text-gray-300">{r.name}</span>
+                  {r.problemId && <span className="text-xs font-mono text-gray-500">#{r.problemId}</span>}
                   <span className="text-xs text-gray-600">
                     {r.failed ? 'failed' : r.ok ? 'imported' : `imported with ${r.errors} warning${r.errors !== 1 ? 's' : ''}`}
                   </span>
+                  {!r.ok && (
+                    <button
+                      onClick={() => handleRetry([r])}
+                      className="ml-auto flex items-center gap-1 text-xs text-amber-400 hover:text-amber-300 transition-colors"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      Retry
+                    </button>
+                  )}
                 </div>
               ))}
             </div>
