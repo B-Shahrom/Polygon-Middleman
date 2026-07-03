@@ -8,7 +8,10 @@ import { useApp } from '../context/AppContext';
 import { Problem } from '../types/polygon';
 import Modal from '../components/ui/Modal';
 import Button from '../components/ui/Button';
-import { convertMdxToLatex, splitMultiLanguage, parseLatexStatement, ParsedSections } from '../utils/statementParser';
+import {
+  convertMdxToLatex, splitMultiLanguage, parseLatexStatement, ParsedSections,
+  deriveDependenciesFromScoring, derivePointsFromScoring,
+} from '../utils/statementParser';
 import { extractGroupFromFilename } from '../utils/testParser';
 
 interface Props {
@@ -24,6 +27,7 @@ interface ParsedZip {
   solutionCode: string | null;
   tests: { index: number; input: string; group: string; filename: string }[];
   hasScoring: boolean;
+  scoringText: string;
 }
 
 interface LogEntry { text: string; status: 'pending' | 'running' | 'done' | 'error'; kind?: 'header' }
@@ -235,13 +239,56 @@ export default function ZipImport({ open, onClose }: Props) {
       });
     }
 
-    // 8. Configure group policies, dependencies, and points
+    // 8. Configure group policies, dependencies, and points.
+    //    - If the statement HAS a scoring section: auto-run "derive dependencies"
+    //      and "derive points" (parse the scoring table for per-group deps/points).
+    //    - Otherwise: last group depends on all others + 100 points on the last group.
     if (allGroups.length > 0) {
       await step('Configuring group policies...', async () => {
         // Re-send enable commands to be safe (Polygon may need them after tests exist)
         await api.problem.enableGroups(pid, 'tests', true);
         await api.problem.enablePoints(pid, true);
 
+        const nonSampleGroups = allGroups.filter(g => g !== '0');
+
+        // Helper: set points on the first test of a group (input already in memory)
+        const setGroupPoints = async (group: string, pts: number) => {
+          const t = parsed.tests.find((x) => x.group === group);
+          if (!t) return false;
+          await api.problem.saveTest({
+            problemId: pid, testset: 'tests',
+            testIndex: t.index, testInput: t.input,
+            testGroup: group, testPoints: pts, checkExisting: false,
+          });
+          return true;
+        };
+
+        if (parsed.hasScoring) {
+          // Derive per-group deps + points straight from the scoring section
+          const depMap = deriveDependenciesFromScoring(parsed.scoringText);
+          const pointsMap = derivePointsFromScoring(parsed.scoringText);
+
+          for (const group of allGroups) {
+            const deps = depMap[group];
+            await api.problem.saveTestGroup({
+              problemId: pid,
+              testset: 'tests',
+              group,
+              pointsPolicy: 'COMPLETE_GROUP',
+              ...(deps && deps.length ? { dependencies: deps.join(',') } : {}),
+            });
+          }
+
+          let ptsApplied = 0;
+          for (const [group, pts] of Object.entries(pointsMap)) {
+            if (await setGroupPoints(group, pts)) ptsApplied++;
+          }
+
+          const depCount = Object.keys(depMap).length;
+          return `Derived from scoring — deps: ${depCount} group(s), points: ${ptsApplied} group(s) (COMPLETE_GROUP)`;
+        }
+
+        // No scoring: last group depends on all others + 100pts on last group
         const lastGroup = allGroups[allGroups.length - 1];
         const otherGroups = allGroups.filter(g => g !== lastGroup);
 
@@ -249,7 +296,6 @@ export default function ZipImport({ open, onClose }: Props) {
           const deps = group === lastGroup && otherGroups.length > 0
             ? otherGroups.join(',')
             : undefined;
-
           await api.problem.saveTestGroup({
             problemId: pid,
             testset: 'tests',
@@ -259,29 +305,13 @@ export default function ZipImport({ open, onClose }: Props) {
           });
         }
 
-        // If no scoring section, assign 100 points to first test of the last group
-        const nonSampleGroups = allGroups.filter(g => g !== '0');
-        if (!parsed.hasScoring && nonSampleGroups.length > 0) {
+        let ptsInfo = '';
+        if (nonSampleGroups.length > 0) {
           const pointsGroup = nonSampleGroups[nonSampleGroups.length - 1];
-          const targetTest = parsed.tests.find(t => t.group === pointsGroup);
-          if (targetTest) {
-            await api.problem.saveTest({
-              problemId: pid,
-              testset: 'tests',
-              testIndex: targetTest.index,
-              testInput: targetTest.input,
-              testGroup: targetTest.group,
-              testPoints: 100,
-              checkExisting: false,
-            });
-          }
+          if (await setGroupPoints(pointsGroup, 100)) ptsInfo = `, 100pts on group ${pointsGroup}`;
         }
-
         const depInfo = otherGroups.length > 0
           ? `, group ${lastGroup} depends on ${otherGroups.join(',')}`
-          : '';
-        const ptsInfo = !parsed.hasScoring && nonSampleGroups.length > 0
-          ? `, 100pts on group ${nonSampleGroups[nonSampleGroups.length - 1]}`
           : '';
         return `Groups configured (COMPLETE_GROUP)${depInfo}${ptsInfo}`;
       });
@@ -555,38 +585,55 @@ async function saveTestWithRetry(
   return false;
 }
 
+/** Lowercased final path segment. */
+function baseName(p: string): string {
+  return (p.split('/').pop() || '').toLowerCase();
+}
+
+/**
+ * Locate the slug root folder from a reference file path. Prefers an
+ * `edu-<name>/` segment anywhere in the path; otherwise uses the top folder.
+ */
+function rootFromPath(p: string): string {
+  const segs = p.split('/');
+  const eduIdx = segs.findIndex(s => /^edu[-_]/i.test(s));
+  if (eduIdx >= 0) return segs.slice(0, eduIdx + 1).join('/') + '/';
+  return segs.length > 1 ? segs[0] + '/' : '';
+}
+
 async function parseZip(zip: JSZip): Promise<ParsedZip> {
   const filePaths = Object.keys(zip.files).filter(p => !zip.files[p].dir);
 
-  // Find root folder (edu-<name>/ or edu_<name>/)
-  let rootPrefix = '';
-  const rootFolder = filePaths.find(p => /^edu[-_]/.test(p));
-  if (rootFolder) {
-    rootPrefix = rootFolder.split('/')[0] + '/';
-  } else {
-    const firstSlash = filePaths[0]?.indexOf('/');
-    if (firstSlash !== undefined && firstSlash > 0) {
-      rootPrefix = filePaths[0].slice(0, firstSlash + 1);
-    }
-  }
+  // ── Strict component lookup ────────────────────────────────────────────────
+  // Only the exact files we need are read; everything else in the archive is
+  // ignored. For each component pick the shallowest matching basename (closest
+  // to the slug root) so a stray copy in a garbage subfolder can't win.
+  const findByName = (...names: string[]): string | undefined => {
+    const wanted = names.map(n => n.toLowerCase());
+    return filePaths
+      .filter(p => wanted.includes(baseName(p)))
+      .sort((a, b) => a.split('/').length - b.split('/').length)[0];
+  };
 
-  // Extract problem name from folder — keep edu- prefix as the Polygon slug
-  let folderName = rootPrefix.replace(/\/$/, '');
-  if (!folderName && filePaths.length > 0) {
-    folderName = 'imported-problem';
-  }
+  const stmtPath = findByName('problem_statement.mdx', 'problem_statement.tex');
+  const checkerPath = findByName('checker.cpp');
+  const solutionPath = findByName('solution.cpp');
+
+  // Slug root folder — derived from a core file so garbage at the top level
+  // (loose files/folders next to the real problem folder) is ignored.
+  const refPath = stmtPath || checkerPath || solutionPath || filePaths[0] || '';
+  const rootPrefix = rootFromPath(refPath);
+
+  // Keep the edu- prefix as the Polygon slug; strip it only for display.
+  const folderName = rootPrefix.replace(/\/$/, '') || 'imported-problem';
   const problemName = folderName;
   const displayName = folderName
     .replace(/^edu[-_]/, '')
     .replace(/[-_]/g, ' ')
     .replace(/\b\w/g, c => c.toUpperCase());
 
-  // Read problem_statement.mdx
+  // Read problem_statement.mdx (or .tex)
   let languages: Record<string, ParsedSections> = {};
-  const stmtPath = filePaths.find(p =>
-    p.toLowerCase().endsWith('problem_statement.mdx') ||
-    p.toLowerCase().endsWith('problem_statement.tex')
-  );
   if (stmtPath) {
     const rawMdx = await zip.files[stmtPath].async('string');
     const isTeX = stmtPath.toLowerCase().endsWith('.tex');
@@ -600,27 +647,23 @@ async function parseZip(zip: JSZip): Promise<ParsedZip> {
 
   // Read checker.cpp
   let checkerCode: string | null = null;
-  const checkerPath = filePaths.find(p =>
-    p.toLowerCase().endsWith('/checker.cpp') || p.toLowerCase() === 'checker.cpp'
-  );
   if (checkerPath) {
     checkerCode = await zip.files[checkerPath].async('string');
   }
 
   // Read solution.cpp
   let solutionCode: string | null = null;
-  const solutionPath = filePaths.find(p =>
-    p.toLowerCase().endsWith('/solution.cpp') || p.toLowerCase() === 'solution.cpp'
-  );
   if (solutionPath) {
     solutionCode = await zip.files[solutionPath].async('string');
   }
 
-  // Read tests from testset/ (also accept tesset/ typo)
+  // Read tests — ONLY input*.txt files inside a testset/ folder (tesset/ typo
+  // accepted), under the slug root. Answer/output/other files are ignored.
   const testFiles = filePaths.filter(p => {
-    const lower = p.toLowerCase();
-    return (lower.includes('/testset/') || lower.includes('/tesset/')) &&
-      !lower.includes('output') && !lower.includes('answer') && !lower.includes('.a');
+    if (rootPrefix && !p.startsWith(rootPrefix)) return false;
+    const segs = p.toLowerCase().split('/');
+    const inTestset = segs.includes('testset') || segs.includes('tesset');
+    return inTestset && /^input.*\.txt$/.test(baseName(p));
   });
 
   interface RawTest { input: string; group: string; sortKey: number; filename: string }
@@ -651,7 +694,12 @@ async function parseZip(zip: JSZip): Promise<ParsedZip> {
     filename: t.filename,
   }));
 
-  const hasScoring = Object.values(languages).some(s => s.scoring.trim().length > 0);
+  const scoringText = (
+    languages['english']?.scoring?.trim() ||
+    Object.values(languages).map(s => s.scoring).find(s => s.trim())?.trim() ||
+    ''
+  );
+  const hasScoring = scoringText.length > 0;
 
-  return { problemName, displayName, languages, checkerCode, solutionCode, tests, hasScoring };
+  return { problemName, displayName, languages, checkerCode, solutionCode, tests, hasScoring, scoringText };
 }

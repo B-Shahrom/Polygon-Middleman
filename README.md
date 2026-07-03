@@ -41,6 +41,8 @@ venv\Scripts\activate        # Windows
 pip install -r requirements.txt
 ```
 
+> **Credentials** live in `backend/config.json`, which is **gitignored and never committed** — your API key/secret never reach GitHub. A `config.example.json` shows the shape; the real file is created locally when you save credentials in **Settings**. On a new device/clone you re-enter them once.
+
 **Frontend:**
 ```bash
 cd frontend
@@ -125,7 +127,7 @@ Polygon_Middleman/
 Click **Import ZIP** on the Problems page and select one or more `.zip` files. Each ZIP holds a single problem:
 
 ```
-edu-problem-name/
+edu-problem-name/           # the folder name becomes the Polygon slug
 ├── problem_statement.mdx   # 4-language statement (\textbf{English} … markers)
 ├── checker.cpp
 ├── solution.cpp
@@ -135,6 +137,8 @@ edu-problem-name/
     └── ...
 ```
 
+**Strict reading** — the importer only reads exactly these components: `problem_statement.mdx` (or `.tex`), `checker.cpp`, `solution.cpp`, and `input*.txt` files inside `testset/`. Any other files/folders in the archive (editorials, generators, `.DS_Store`, answer files, etc.) are ignored.
+
 For every problem the importer runs an isolated pipeline:
 
 1. Creates the problem using the **full folder name as the slug** (the `edu-` prefix is kept)
@@ -142,13 +146,15 @@ For every problem the importer runs an isolated pipeline:
 3. Saves a statement per detected language
 4. Uploads `checker.cpp` and sets it as the checker
 5. Uploads `solution.cpp` tagged `MA` (main correct)
-6. Enables groups and points, then uploads grouped tests
-7. Sets every group's points policy to `COMPLETE_GROUP`, makes the **last group depend on all other groups**, and — if the statement has no scoring section — assigns **100 points** to the last group
+6. Enables groups and points, then uploads grouped tests (each test retried; duplicate-content tests still written so the `1..N` enumeration never gaps)
+7. Sets every group's points policy to `COMPLETE_GROUP`, then:
+   - **If the statement has a scoring section** — auto-runs **Derive Dependencies** and **Derive Points**, parsing the scoring table for per-group dependencies and points.
+   - **Otherwise** — makes the **last group depend on all other groups** and assigns **100 points** to the last group.
 8. **Commits** the changes and requests **verification** via `buildPackage(verify=true)`, which invokes every solution on every test (and the checker on stress tests) to confirm the tags are valid
 
 > The commit is required because the Polygon API can only verify a *committed* revision — the web UI's working-copy "Verify" button is not exposed as an API method.
 
-Imports are **fault-isolated**: a failing step is logged in red and the pipeline continues; a failing problem is skipped and the rest of the batch keeps going. A per-problem summary is shown at the end.
+Imports are **fault-isolated**: a failing step is logged in red and the pipeline continues; a failing problem is skipped and the rest of the batch keeps going. If any test fails to upload after retries, commit + verify are skipped so the problem stays clean for a re-import. A per-problem summary is shown at the end.
 
 ### Multi-Language Splitting
 

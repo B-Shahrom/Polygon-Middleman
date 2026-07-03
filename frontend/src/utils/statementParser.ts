@@ -231,3 +231,100 @@ export function splitMultiLanguage(raw: string): Record<string, ParsedSections> 
 
   return result;
 }
+
+// --------------- Scoring section parsers ---------------
+// Shared by the Tests tab (manual "Derive …" buttons) and the ZIP importer
+// (auto-run when the imported statement has a scoring section).
+
+/**
+ * Parse group → dependency-list from a Scoring section.
+ * Supports LaTeX tabular rows ("3 & No additional & 60 & 0, 1, 2 \\") and the
+ * plain-text "Subtask 3 ... depends on subtasks 1, 2" form.
+ */
+export function deriveDependenciesFromScoring(scoring: string): Record<string, string[]> {
+  const depMap: Record<string, string[]> = {};
+  const lines = scoring.split('\n');
+
+  let foundTabular = false;
+  for (const line of lines) {
+    const cells = line.split('&').map((c) => c.replace(/\\\\/g, '').trim());
+    if (cells.length >= 3) {
+      const groupMatch = cells[0].match(/(\d+)/);
+      if (!groupMatch) continue;
+      const groupNum = groupMatch[1];
+
+      const lastCell = cells[cells.length - 1];
+
+      // Skip header rows
+      if (/subtask|group|dependencies|required/i.test(cells[0]) && /constraint|points|dep/i.test(cells[1])) continue;
+      // Skip "no dependencies" cells (dashes / empty)
+      if (/^[-—\s]*$/.test(lastCell) || lastCell === '') continue;
+
+      const depNums = lastCell.match(/\d+/g);
+      if (depNums && depNums.length > 0) {
+        depMap[groupNum] = depNums.map((n) => n.trim());
+        foundTabular = true;
+      }
+    }
+  }
+
+  if (!foundTabular) {
+    for (const line of lines) {
+      const subtaskMatch = line.match(/(?:subtask|group)\s+(\d+)/i);
+      if (!subtaskMatch) continue;
+      const groupNum = subtaskMatch[1];
+      const depMatch = line.match(/depends?\s+on\s+(?:subtasks?\s+)?(.+?)(?:\.|$)/i);
+      if (depMatch) {
+        const depNums = depMatch[1].match(/\d+/g);
+        if (depNums && depNums.length > 0) depMap[groupNum] = depNums;
+      }
+    }
+  }
+
+  return depMap;
+}
+
+/**
+ * Parse group → points from a Scoring section.
+ * Supports LaTeX tabular ("group & constraint & points & deps \\") and the
+ * plain-text "Subtask N (X points)" form.
+ */
+export function derivePointsFromScoring(scoring: string): Record<string, number> {
+  const pointsMap: Record<string, number> = {};
+  const lines = scoring.split('\n');
+
+  let foundTabular = false;
+  for (const line of lines) {
+    const cells = line.split('&').map((c) => c.replace(/\\\\/g, '').trim());
+    if (cells.length >= 3) {
+      const groupMatch = cells[0].match(/(\d+)/);
+      if (!groupMatch) continue;
+      const groupNum = groupMatch[1];
+
+      if (/subtask|group|dependencies|required/i.test(cells[0]) && /constraint|points|dep/i.test(cells[1])) continue;
+
+      let pointsVal: number | null = null;
+      for (let ci = 1; ci < cells.length; ci++) {
+        const cell = cells[ci].replace(/[$ \\]/g, '').trim();
+        if (/^\d+$/.test(cell) && !/[<>=]/.test(cells[ci])) {
+          pointsVal = parseInt(cell, 10);
+          break;
+        }
+      }
+
+      if (pointsVal !== null) {
+        pointsMap[groupNum] = pointsVal;
+        foundTabular = true;
+      }
+    }
+  }
+
+  if (!foundTabular) {
+    for (const line of lines) {
+      const m = line.match(/(?:subtask|group)\s+(\d+)\s*.*?(\d+)\s*(?:points?|баллов|очков)/i);
+      if (m) pointsMap[m[1]] = parseInt(m[2], 10);
+    }
+  }
+
+  return pointsMap;
+}

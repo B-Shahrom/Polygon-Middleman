@@ -30,6 +30,7 @@ interface PendingTest {
 }
 
 import { extractGroupFromFilename, extractIndexFromFilename } from '../utils/testParser';
+import { deriveDependenciesFromScoring, derivePointsFromScoring } from '../utils/statementParser';
 
 /** Truncate string for preview */
 function truncate(s: string, max: number): string {
@@ -628,60 +629,8 @@ export default function TestsTab({ problemId }: Props) {
         return;
       }
 
-      // Parse scoring for dependency patterns
-      // Supports LaTeX tabular format:
-      //   0 & Tests from the example & 0 & --- \\
-      //   1 & $n \le 100$ & 15 & 0 \\
-      //   3 & No additional & 60 & 0, 1, 2 \\
-      // Also supports plain text: "Subtask 3 ... depends on subtasks 1, 2"
-      const depMap: Record<string, string[]> = {};
-      const lines = scoring.split('\n');
-
-      // Try LaTeX tabular format first: rows separated by &
-      let foundTabular = false;
-      for (const line of lines) {
-        // Match tabular rows: cells separated by &, ending with \\
-        const cells = line.split('&').map(c => c.replace(/\\\\/g, '').trim());
-        if (cells.length >= 3) {
-          // First cell should contain a subtask/group number
-          const groupMatch = cells[0].match(/(\d+)/);
-          if (!groupMatch) continue;
-          const groupNum = groupMatch[1];
-
-          // Last cell (or a cell labeled "Required Subtasks" / "Dependencies") contains deps
-          const lastCell = cells[cells.length - 1];
-
-          // Skip if it's a header row
-          if (/subtask|group|dependencies|required/i.test(cells[0]) && /constraint|points|dep/i.test(cells[1])) continue;
-
-          // Skip cells that are just dashes (no dependencies)
-          if (/^[-—\s]*$/.test(lastCell) || lastCell === '') continue;
-
-          // Extract numbers from the dependency cell
-          const depNums = lastCell.match(/\d+/g);
-          if (depNums && depNums.length > 0) {
-            depMap[groupNum] = depNums.map(n => n.trim());
-            foundTabular = true;
-          }
-        }
-      }
-
-      // Fallback: try plain text "depends on" format
-      if (!foundTabular) {
-        for (const line of lines) {
-          const subtaskMatch = line.match(/(?:subtask|group)\s+(\d+)/i);
-          if (!subtaskMatch) continue;
-          const groupNum = subtaskMatch[1];
-
-          const depMatch = line.match(/depends?\s+on\s+(?:subtasks?\s+)?(.+?)(?:\.|$)/i);
-          if (depMatch) {
-            const depNums = depMatch[1].match(/\d+/g);
-            if (depNums && depNums.length > 0) {
-              depMap[groupNum] = depNums;
-            }
-          }
-        }
-      }
+      // Parse scoring for dependency patterns (shared with the ZIP importer)
+      const depMap = deriveDependenciesFromScoring(scoring);
 
       if (Object.keys(depMap).length === 0) {
         toast('error', 'Could not parse dependencies from scoring section. Expected format: "Subtask N ... depends on subtasks X, Y"');
@@ -730,50 +679,8 @@ export default function TestsTab({ problemId }: Props) {
         return;
       }
 
-      // Parse scoring for group → points mapping
-      // LaTeX tabular: group_num & constraint & points & deps \\
-      const pointsMap: Record<string, number> = {};
-      const lines = scoring.split('\n');
-
-      let foundTabular = false;
-      for (const line of lines) {
-        const cells = line.split('&').map(c => c.replace(/\\\\/g, '').trim());
-        if (cells.length >= 3) {
-          const groupMatch = cells[0].match(/(\d+)/);
-          if (!groupMatch) continue;
-          const groupNum = groupMatch[1];
-
-          // Skip header rows
-          if (/subtask|group|dependencies|required/i.test(cells[0]) && /constraint|points|dep/i.test(cells[1])) continue;
-
-          // Points is typically the 3rd column (index 2)
-          // Try each cell to find a standalone number that looks like points
-          let pointsVal: number | null = null;
-          for (let ci = 1; ci < cells.length; ci++) {
-            const cell = cells[ci].replace(/[$ \\]/g, '').trim();
-            // Match a standalone number (not a constraint like "n <= 100")
-            if (/^\d+$/.test(cell) && !/[<>=]/.test(cells[ci])) {
-              pointsVal = parseInt(cell, 10);
-              break; // Use first standalone number found after group
-            }
-          }
-
-          if (pointsVal !== null) {
-            pointsMap[groupNum] = pointsVal;
-            foundTabular = true;
-          }
-        }
-      }
-
-      // Fallback: plain text "Subtask N (X points)"
-      if (!foundTabular) {
-        for (const line of lines) {
-          const m = line.match(/(?:subtask|group)\s+(\d+)\s*.*?(\d+)\s*(?:points?|баллов|очков)/i);
-          if (m) {
-            pointsMap[m[1]] = parseInt(m[2], 10);
-          }
-        }
-      }
+      // Parse scoring for group → points mapping (shared with the ZIP importer)
+      const pointsMap = derivePointsFromScoring(scoring);
 
       if (Object.keys(pointsMap).length === 0) {
         toast('error', 'Could not parse points from scoring section. Expected tabular format with group & constraint & points columns.');
