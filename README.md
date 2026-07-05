@@ -141,7 +141,17 @@ edu-problem-name/           # the folder name becomes the Polygon slug
 
 **Strict reading** — the importer only reads these components: `problem_statement.mdx` (or `.tex`), `checker.cpp`, `solution.cpp`, an optional `validator.cpp`, optional extra solutions (`.cpp` whose name starts with a tag prefix — `wa`, `tle`/`tl`/`slow`, `mle`/`ml`, `re`/`rte`, `pe`, `to`, `tm`, `ok`/`ac`/`brute`), and `input*.txt` files inside `testset/`. Everything else (editorials, generators, `.DS_Store`, answer files, etc.) is ignored.
 
-**Pre-flight validation** — the preview screen flags problems before upload: missing checker/solution/tests/languages, **non-contiguous test groups** (e.g. 0,1,3 — missing 2), and scoring tables that reference groups without tests. You can also **edit the slug, time limit and memory limit per ZIP, or skip a problem**, right in the preview. A local **import history** (with Polygon links and copyable IDs) persists across sessions.
+**Pre-flight validation** — the preview screen flags problems before upload: missing checker/solution/tests/languages, **non-contiguous test groups** (e.g. 0,1,3 — missing 2), and scoring tables that reference groups without tests. You can also **edit the slug, time limit and memory limit per ZIP** right in the preview. A local **import history** (with Polygon links and copyable slugs) persists across sessions.
+
+**Handling a slug that already exists** — each ZIP has an **If exists** policy:
+
+| Policy | Behavior |
+|--------|----------|
+| **Skip** | Leave the existing problem untouched. |
+| **Fill / update** *(default)* | Upload the archive into the existing problem — adds what's missing and overwrites what changed. This is also what **Retry** uses. |
+| **Reset & overwrite** | Discard the problem's working copy first, then upload. |
+
+> ⚠️ The Polygon API has **no delete-problem method** (deletion is UI-only), so *Reset* discards the **working copy** and re-uploads. It fully resets a problem that was never committed, but it can't remove already-committed surplus tests — for that, delete the problem in the Polygon UI first, then import.
 
 For every problem the importer runs an isolated pipeline:
 

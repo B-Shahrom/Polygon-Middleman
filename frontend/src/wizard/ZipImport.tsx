@@ -41,14 +41,26 @@ interface ParsedZip {
 
 interface LogEntry { text: string; status: 'pending' | 'running' | 'done' | 'error'; kind?: 'header' }
 
+// What to do when a problem with the same slug already exists on Polygon.
+//   skip  — leave the existing problem untouched
+//   fill  — upload the archive over it (adds missing, overwrites changed) [default]
+//   reset — discard the working copy first, then upload (hard overwrite)
+type OnExists = 'skip' | 'fill' | 'reset';
+
+const ON_EXISTS_LABEL: Record<OnExists, string> = {
+  skip: 'Skip',
+  fill: 'Fill / update',
+  reset: 'Reset & overwrite',
+};
+
 /** Per-problem, user-editable overrides applied at import time. */
-interface ImportOpts { slug: string; timeLimit: number; memoryLimit: number }
+interface ImportOpts { slug: string; timeLimit: number; memoryLimit: number; onExists: OnExists }
 
 interface ParsedItem {
   fileName: string;
   parsed: ParsedZip | null;
   parseError?: string;
-  skip: boolean;
+  onExists: OnExists;
   slug: string;         // editable Polygon slug (defaults to folder name)
   timeLimit: number;    // ms
   memoryLimit: number;  // MB
@@ -61,6 +73,7 @@ interface ImportResult {
   ok: boolean;
   errors: number;
   failed?: boolean;
+  skipped?: boolean;
   parsed: ParsedZip;
   opts: ImportOpts;
 }
@@ -123,7 +136,7 @@ export default function ZipImport({ open, onClose }: Props) {
         parsedItems.push({
           fileName: file.name,
           parsed: result,
-          skip: false,
+          onExists: 'fill',
           slug: result.problemName,
           timeLimit: 1000,
           memoryLimit: 256,
@@ -133,7 +146,7 @@ export default function ZipImport({ open, onClose }: Props) {
           fileName: file.name,
           parsed: null,
           parseError: err instanceof Error ? err.message : 'Failed to parse ZIP',
-          skip: false,
+          onExists: 'fill',
           slug: '',
           timeLimit: 1000,
           memoryLimit: 256,
@@ -150,7 +163,7 @@ export default function ZipImport({ open, onClose }: Props) {
   };
 
   // Upload a single parsed problem. Returns step-level errors + the problem id.
-  const importProblem = async (parsed: ParsedZip, opts: ImportOpts): Promise<{ failed: boolean; errors: number; problemId?: number }> => {
+  const importProblem = async (parsed: ParsedZip, opts: ImportOpts): Promise<{ failed: boolean; errors: number; problemId?: number; skipped?: boolean }> => {
     let errors = 0;
 
     const step = async (label: string, fn: () => Promise<string | void>) => {
@@ -164,13 +177,28 @@ export default function ZipImport({ open, onClose }: Props) {
       }
     };
 
-    // 1. Create problem (fatal for THIS problem — skip the rest of its steps if it fails)
+    // 1. Create-or-resolve the problem. Polygon's problem.create THROWS
+    //    ("you already have such problem") when the slug exists, so we treat that
+    //    as an existing problem and resolve its id from problems.list.
     let problemId: number | undefined;
+    let existed = false;
     addLog(`Creating problem "${opts.slug}"...`, 'running');
     try {
       const createRes = await api.problems.create(opts.slug) as { result?: Problem };
       problemId = createRes.result?.id;
-      if (!problemId) {
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/already\s+have|already\s+exists|such\s+problem/i.test(msg)) {
+        existed = true;
+      } else {
+        updateLastLog('error', `Failed to create problem — ${msg}`);
+        return { failed: true, errors: errors + 1 };
+      }
+    }
+    // Resolve the id by name when create didn't return one (existing problem, or
+    // Polygon's occasional omission of result.id on a fresh create).
+    if (!problemId) {
+      try {
         const listRes = await api.problems.list({}) as { result?: unknown };
         const all: Problem[] = Array.isArray((listRes as { result?: unknown }).result) ? (listRes as { result: Problem[] }).result : [];
         const target = opts.slug;
@@ -178,15 +206,33 @@ export default function ZipImport({ open, onClose }: Props) {
           all.find((p) => p.name === target) ??
           all.find((p) => p.name.toLowerCase() === target.toLowerCase());
         problemId = found?.id;
-      }
-      if (!problemId) throw new Error('Problem was created but its ID could not be retrieved.');
-      updateLastLog('done', `Created problem #${problemId}`);
-    } catch (err) {
-      updateLastLog('error', `Failed to create problem — ${err instanceof Error ? err.message : 'Unknown error'}`);
+      } catch { /* fall through to failure below */ }
+    }
+    if (!problemId) {
+      updateLastLog('error', `Failed to resolve problem "${opts.slug}" (${existed ? 'exists but not found in list' : 'id not returned'})`);
       return { failed: true, errors: errors + 1 };
     }
 
     const pid = problemId;
+
+    // Apply the on-exists policy for a problem that already existed.
+    if (existed) {
+      if (opts.onExists === 'skip') {
+        updateLastLog('done', `Skipped — "${opts.slug}" already exists (#${pid})`);
+        return { failed: false, errors: 0, problemId: pid, skipped: true };
+      }
+      if (opts.onExists === 'reset') {
+        updateLastLog('done', `Exists (#${pid}) — reset & overwrite`);
+        await step('Discarding working copy...', async () => {
+          await api.problem.discardWorkingCopy(pid);
+          return 'Working copy discarded';
+        });
+      } else {
+        updateLastLog('done', `Exists (#${pid}) — filling / updating`);
+      }
+    } else {
+      updateLastLog('done', `Created problem #${pid}`);
+    }
 
     // 2. Update info
     await step(`Setting problem info (TL=${opts.timeLimit}ms, ML=${opts.memoryLimit}MB)...`, async () => {
@@ -419,9 +465,9 @@ export default function ZipImport({ open, onClose }: Props) {
   const runImportFor = async (parsed: ParsedZip, opts: ImportOpts, headerLabel: string): Promise<ImportResult> => {
     addLog(headerLabel, 'running', 'header');
     try {
-      const { failed, errors, problemId } = await importProblem(parsed, opts);
+      const { failed, errors, problemId, skipped } = await importProblem(parsed, opts);
       updateHeader(parsed.displayName, failed || errors > 0 ? 'error' : 'done');
-      return { name: parsed.displayName, slug: opts.slug, problemId, ok: !failed && errors === 0, errors, failed, parsed, opts };
+      return { name: parsed.displayName, slug: opts.slug, problemId, ok: !failed && errors === 0, errors, failed, skipped, parsed, opts };
     } catch (err) {
       addLog(`Unexpected error: ${err instanceof Error ? err.message : 'Unknown'}`, 'error');
       updateHeader(parsed.displayName, 'error');
@@ -430,13 +476,15 @@ export default function ZipImport({ open, onClose }: Props) {
   };
 
   const announce = (rs: ImportResult[]) => {
-    const fullOk = rs.filter(r => r.ok).length;
+    const skipped = rs.filter(r => r.skipped).length;
+    const fullOk = rs.filter(r => r.ok && !r.skipped).length;
     const partial = rs.filter(r => !r.ok && !r.failed).length;
     const failed = rs.filter(r => r.failed).length;
+    const skipTxt = skipped ? `, ${skipped} skipped` : '';
     if (failed === 0 && partial === 0) {
-      toast('success', `All ${fullOk} problem(s) imported successfully!`);
+      toast('success', `Done: ${fullOk} imported${skipTxt}`);
     } else {
-      toast('warning', `Done: ${fullOk} clean, ${partial} with warnings, ${failed} failed — check the log`);
+      toast('warning', `Done: ${fullOk} clean, ${partial} with warnings, ${failed} failed${skipTxt} — check the log`);
     }
   };
 
@@ -453,7 +501,7 @@ export default function ZipImport({ open, onClose }: Props) {
   };
 
   const handleImport = async () => {
-    const toImport = items.filter(i => i.parsed && !i.skip);
+    const toImport = items.filter(i => i.parsed);
     if (toImport.length === 0) return;
 
     setPhase('uploading');
@@ -463,7 +511,12 @@ export default function ZipImport({ open, onClose }: Props) {
 
     for (let i = 0; i < toImport.length; i++) {
       const it = toImport[i];
-      const opts: ImportOpts = { slug: it.slug.trim() || it.parsed!.problemName, timeLimit: it.timeLimit, memoryLimit: it.memoryLimit };
+      const opts: ImportOpts = {
+        slug: it.slug.trim() || it.parsed!.problemName,
+        timeLimit: it.timeLimit,
+        memoryLimit: it.memoryLimit,
+        onExists: it.onExists,
+      };
       runResults.push(await runImportFor(it.parsed!, opts, `Problem ${i + 1}/${toImport.length}: ${it.parsed!.displayName}`));
     }
 
@@ -489,7 +542,10 @@ export default function ZipImport({ open, onClose }: Props) {
 
     for (let i = 0; i < retryable.length; i++) {
       const t = retryable[i];
-      const res = await runImportFor(t.parsed, t.opts, `Retry ${i + 1}/${retryable.length}: ${t.parsed.displayName}`);
+      // The problem now exists (created on the first attempt), so retry must
+      // overwrite rather than skip. Upgrade a 'skip' policy to 'fill'.
+      const retryOpts: ImportOpts = { ...t.opts, onExists: t.opts.onExists === 'skip' ? 'fill' : t.opts.onExists };
+      const res = await runImportFor(t.parsed, retryOpts, `Retry ${i + 1}/${retryable.length}: ${t.parsed.displayName}`);
       const idx = updated.findIndex(r => r.name === res.name);
       if (idx >= 0) updated[idx] = res; else updated.push(res);
       redone.push(res);
@@ -502,26 +558,25 @@ export default function ZipImport({ open, onClose }: Props) {
     announce(updated);
   };
 
-  // Copy the imported problems as a paste-friendly "id<TAB>slug<TAB>name" list.
+  // Copy the slugs of every problem in the run (one per line), including
+  // failed ones — the slug is what you paste to build a contest.
   const copyImportedList = async () => {
-    const withIds = results.filter(r => r.problemId);
-    if (withIds.length === 0) { toast('error', 'No problem IDs to copy yet'); return; }
-    const text = withIds.map(r => `${r.problemId}\t${r.slug}\t${r.name}`).join('\n');
+    if (results.length === 0) { toast('error', 'Nothing to copy yet'); return; }
+    const text = results.map(r => r.slug).join('\n');
     try {
       await navigator.clipboard.writeText(text);
-      toast('success', `Copied ${withIds.length} problem ID(s) to clipboard`);
+      toast('success', `Copied ${results.length} slug(s) to clipboard`);
     } catch {
       toast('error', 'Clipboard copy failed');
     }
   };
 
   const copyHistoryList = async () => {
-    const withIds = history.filter(h => h.problemId);
-    if (withIds.length === 0) { toast('error', 'No problem IDs in history'); return; }
-    const text = withIds.map(h => `${h.problemId}\t${h.slug}\t${h.name}`).join('\n');
+    if (history.length === 0) { toast('error', 'No history to copy'); return; }
+    const text = history.map(h => h.slug).join('\n');
     try {
       await navigator.clipboard.writeText(text);
-      toast('success', `Copied ${withIds.length} problem ID(s) from history`);
+      toast('success', `Copied ${history.length} slug(s) from history`);
     } catch {
       toast('error', 'Clipboard copy failed');
     }
@@ -546,7 +601,7 @@ export default function ZipImport({ open, onClose }: Props) {
 
   const okCount = items.filter(i => i.parsed).length;
   const badCount = items.length - okCount;
-  const importCount = items.filter(i => i.parsed && !i.skip).length;
+  const importCount = okCount;
 
   return (
     <Modal
@@ -571,9 +626,9 @@ export default function ZipImport({ open, onClose }: Props) {
           </>
         ) : phase === 'done' ? (
           <>
-            {results.some(r => r.problemId) && (
+            {results.length > 0 && (
               <Button variant="ghost" icon={<Copy className="w-4 h-4" />} onClick={copyImportedList}>
-                Copy IDs
+                Copy slugs
               </Button>
             )}
             {failedResults.length > 0 && (
@@ -592,7 +647,7 @@ export default function ZipImport({ open, onClose }: Props) {
             <h3 className="text-sm font-semibold text-gray-200">Import History</h3>
             <div className="flex items-center gap-2">
               <Button variant="ghost" size="sm" icon={<Copy className="w-3.5 h-3.5" />} onClick={copyHistoryList} disabled={history.length === 0}>
-                Copy IDs
+                Copy slugs
               </Button>
               <Button variant="ghost" size="sm" icon={<Trash2 className="w-3.5 h-3.5" />} onClick={handleClearHistory} disabled={history.length === 0}>
                 Clear
@@ -680,7 +735,7 @@ export default function ZipImport({ open, onClose }: Props) {
           </p>
           <div className="space-y-2 max-h-[26rem] overflow-y-auto pr-1">
             {items.map((item, idx) => (
-              <div key={idx} className={`border rounded-lg overflow-hidden ${!item.parsed ? 'border-red-500/30' : item.skip ? 'border-[#2a251f] opacity-55' : 'border-[#362f28]'}`}>
+              <div key={idx} className={`border rounded-lg overflow-hidden ${!item.parsed ? 'border-red-500/30' : 'border-[#362f28]'}`}>
                 <div className="bg-[#211e1a] px-3 py-2 flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2 min-w-0">
                     {item.parsed
@@ -691,14 +746,17 @@ export default function ZipImport({ open, onClose }: Props) {
                     </span>
                   </div>
                   {item.parsed && (
-                    <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer select-none flex-shrink-0">
-                      <input
-                        type="checkbox"
-                        checked={item.skip}
-                        onChange={(e) => updateItem(idx, { skip: e.target.checked })}
-                        className="rounded accent-amber-500"
-                      />
-                      Skip
+                    <label className="flex items-center gap-1.5 text-xs text-gray-500 flex-shrink-0">
+                      If exists
+                      <select
+                        value={item.onExists}
+                        onChange={(e) => updateItem(idx, { onExists: e.target.value as OnExists })}
+                        className="bg-[#1a1714] border border-[#362f28] rounded px-2 py-1 text-xs text-gray-200 focus:outline-none focus:border-amber-500"
+                      >
+                        {(Object.keys(ON_EXISTS_LABEL) as OnExists[]).map((k) => (
+                          <option key={k} value={k}>{ON_EXISTS_LABEL[k]}</option>
+                        ))}
+                      </select>
                     </label>
                   )}
                 </div>
@@ -711,8 +769,7 @@ export default function ZipImport({ open, onClose }: Props) {
                         <input
                           value={item.slug}
                           onChange={(e) => updateItem(idx, { slug: e.target.value })}
-                          disabled={item.skip}
-                          className="bg-[#1a1714] border border-[#362f28] rounded px-2 py-1 text-xs font-mono text-gray-200 w-56 focus:outline-none focus:border-amber-500 disabled:opacity-50"
+                          className="bg-[#1a1714] border border-[#362f28] rounded px-2 py-1 text-xs font-mono text-gray-200 w-56 focus:outline-none focus:border-amber-500"
                         />
                       </label>
                       <label className="flex items-center gap-1.5 text-xs text-gray-500">
@@ -721,8 +778,7 @@ export default function ZipImport({ open, onClose }: Props) {
                           type="number" min={250} step={250}
                           value={item.timeLimit}
                           onChange={(e) => updateItem(idx, { timeLimit: Number(e.target.value) || 1000 })}
-                          disabled={item.skip}
-                          className="bg-[#1a1714] border border-[#362f28] rounded px-2 py-1 text-xs text-gray-200 w-20 focus:outline-none focus:border-amber-500 disabled:opacity-50"
+                          className="bg-[#1a1714] border border-[#362f28] rounded px-2 py-1 text-xs text-gray-200 w-20 focus:outline-none focus:border-amber-500"
                         />
                         <span className="text-gray-600">ms</span>
                       </label>
@@ -732,8 +788,7 @@ export default function ZipImport({ open, onClose }: Props) {
                           type="number" min={64} step={64}
                           value={item.memoryLimit}
                           onChange={(e) => updateItem(idx, { memoryLimit: Number(e.target.value) || 256 })}
-                          disabled={item.skip}
-                          className="bg-[#1a1714] border border-[#362f28] rounded px-2 py-1 text-xs text-gray-200 w-20 focus:outline-none focus:border-amber-500 disabled:opacity-50"
+                          className="bg-[#1a1714] border border-[#362f28] rounded px-2 py-1 text-xs text-gray-200 w-20 focus:outline-none focus:border-amber-500"
                         />
                         <span className="text-gray-600">MB</span>
                       </label>
@@ -808,11 +863,13 @@ export default function ZipImport({ open, onClose }: Props) {
               <div className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">Summary</div>
               {results.map((r, i) => (
                 <div key={i} className="flex items-center gap-2 text-sm">
-                  {r.failed
-                    ? <X className="w-4 h-4 text-red-400 flex-shrink-0" />
-                    : r.ok
-                      ? <CheckCircle2 className="w-4 h-4 text-green-400 flex-shrink-0" />
-                      : <AlertCircle className="w-4 h-4 text-yellow-400 flex-shrink-0" />}
+                  {r.skipped
+                    ? <CheckCircle2 className="w-4 h-4 text-gray-500 flex-shrink-0" />
+                    : r.failed
+                      ? <X className="w-4 h-4 text-red-400 flex-shrink-0" />
+                      : r.ok
+                        ? <CheckCircle2 className="w-4 h-4 text-green-400 flex-shrink-0" />
+                        : <AlertCircle className="w-4 h-4 text-yellow-400 flex-shrink-0" />}
                   <span className="text-gray-300">{r.name}</span>
                   {r.problemId && (
                     <a
@@ -824,7 +881,7 @@ export default function ZipImport({ open, onClose }: Props) {
                     </a>
                   )}
                   <span className="text-xs text-gray-600">
-                    {r.failed ? 'failed' : r.ok ? 'imported' : `imported with ${r.errors} warning${r.errors !== 1 ? 's' : ''}`}
+                    {r.skipped ? 'skipped (already exists)' : r.failed ? 'failed' : r.ok ? 'imported' : `imported with ${r.errors} warning${r.errors !== 1 ? 's' : ''}`}
                   </span>
                   {!r.ok && (
                     <button
