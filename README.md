@@ -31,13 +31,20 @@ A full-featured desktop web application for uploading and managing competitive p
 - Node.js 18+ with npm
 - Polygon API key and secret
 
+Works on **Windows, macOS, and Linux** — the app itself is fully cross-platform; only the convenience launchers differ per OS.
+
 ### Setup
 
 **Backend:**
 ```bash
 cd backend
 python -m venv venv
-venv\Scripts\activate        # Windows
+
+# Windows
+venv\Scripts\activate
+# macOS / Linux
+source venv/bin/activate
+
 pip install -r requirements.txt
 ```
 
@@ -55,7 +62,13 @@ npm install
 # Windows
 start.bat
 
-# Or manually:
+# macOS / Linux (first run: chmod +x start.sh)
+./start.sh
+```
+
+Each launcher creates the venv, installs deps, starts both servers, and opens the browser. Or run the two servers manually:
+
+```bash
 # Terminal 1
 cd backend && uvicorn main:app --reload --port 8000
 
@@ -64,6 +77,8 @@ cd frontend && npm run dev
 ```
 
 Then open [http://localhost:5173](http://localhost:5173)
+
+> On macOS/Linux you can also use `./start_backend.sh` and `./start_frontend.sh` to run each server separately (the `.bat` equivalents are for Windows).
 
 ### First Use
 
