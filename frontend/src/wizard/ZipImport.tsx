@@ -53,6 +53,9 @@ const ON_EXISTS_LABEL: Record<OnExists, string> = {
   reset: 'Reset & overwrite',
 };
 
+// Polygon source type used when uploading the checker.
+const CHECKER_SOURCE_TYPE = 'cpp.gcc14-64-msys2-g++23';
+
 /** Per-problem, user-editable overrides applied at import time. */
 interface ImportOpts { slug: string; timeLimit: number; memoryLimit: number; onExists: OnExists }
 
@@ -270,12 +273,12 @@ export default function ZipImport({ open, onClose }: Props) {
       });
     }
 
-    // 4. Upload checker
+    // 4. Upload checker (uses the msys2 g++23 source type per project convention)
     if (parsed.checkerCode) {
       await step('Uploading checker.cpp...', async () => {
         const checkerBlob = new Blob([parsed.checkerCode!], { type: 'text/plain' });
         const checkerFile = new File([checkerBlob], 'checker.cpp', { type: 'text/plain' });
-        await api.problem.saveFile(pid, 'source', 'checker.cpp', checkerFile, 'cpp.g++17');
+        await api.problem.saveFile(pid, 'source', 'checker.cpp', checkerFile, CHECKER_SOURCE_TYPE);
         await api.problem.setChecker(pid, 'checker.cpp');
         return 'Checker uploaded & set';
       });
