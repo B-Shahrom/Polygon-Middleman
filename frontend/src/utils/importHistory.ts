@@ -3,6 +3,7 @@
 
 export interface ImportHistoryEntry {
   ts: number;                 // epoch ms
+  batchId?: string;           // groups entries from the same import run
   name: string;               // display name
   slug: string;               // Polygon slug used
   problemId?: number;         // undefined if create failed

@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import {
   Archive, Upload, CheckCircle2, Loader2, X, AlertCircle, Copy, RotateCcw,
   History, Trash2, ExternalLink,
@@ -42,19 +42,39 @@ interface ParsedZip {
 interface LogEntry { text: string; status: 'pending' | 'running' | 'done' | 'error'; kind?: 'header' }
 
 // What to do when a problem with the same slug already exists on Polygon.
-//   skip  — leave the existing problem untouched
 //   fill  — upload the archive over it (adds missing, overwrites changed) [default]
 //   reset — discard the working copy first, then upload (hard overwrite)
-type OnExists = 'skip' | 'fill' | 'reset';
+type OnExists = 'fill' | 'reset';
 
 const ON_EXISTS_LABEL: Record<OnExists, string> = {
-  skip: 'Skip',
   fill: 'Fill / update',
   reset: 'Reset & overwrite',
 };
 
+// Background verification (buildPackage) outcome per problem.
+type VerifyStatus = 'verifying' | 'passed' | 'failed';
+
 // Polygon source type used when uploading the checker.
 const CHECKER_SOURCE_TYPE = 'cpp.gcc14-64-msys2-g++23';
+
+interface HistoryBatch { key: string; ts: number; entries: ImportHistoryEntry[] }
+
+/** Group history entries by their import run (batchId), preserving order. */
+function groupHistory(history: ImportHistoryEntry[]): HistoryBatch[] {
+  const groups: HistoryBatch[] = [];
+  const byId = new Map<string, number>();
+  for (const h of history) {
+    const key = h.batchId || `legacy-${h.ts}`;
+    let gi = byId.get(key);
+    if (gi === undefined) {
+      gi = groups.length;
+      byId.set(key, gi);
+      groups.push({ key, ts: h.ts, entries: [] });
+    }
+    groups[gi].entries.push(h);
+  }
+  return groups;
+}
 
 /** Per-problem, user-editable overrides applied at import time. */
 interface ImportOpts { slug: string; timeLimit: number; memoryLimit: number; onExists: OnExists }
@@ -63,7 +83,8 @@ interface ParsedItem {
   fileName: string;
   parsed: ParsedZip | null;
   parseError?: string;
-  onExists: OnExists;
+  skip: boolean;        // exclude this ZIP from the batch entirely
+  onExists: OnExists;   // what to do if the slug already exists on Polygon
   slug: string;         // editable Polygon slug (defaults to folder name)
   timeLimit: number;    // ms
   memoryLimit: number;  // MB
@@ -76,7 +97,9 @@ interface ImportResult {
   ok: boolean;
   errors: number;
   failed?: boolean;
-  skipped?: boolean;
+  verifyRequested?: boolean;
+  verifyStatus?: VerifyStatus;
+  verifyComment?: string;
   parsed: ParsedZip;
   opts: ImportOpts;
 }
@@ -95,9 +118,45 @@ export default function ZipImport({ open, onClose }: Props) {
   const [results, setResults] = useState<ImportResult[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [history, setHistory] = useState<ImportHistoryEntry[]>(() => loadImportHistory());
+  // Lowercased names of problems already on Polygon (for slug-conflict warnings).
+  const [existingNames, setExistingNames] = useState<Set<string>>(new Set());
 
   const updateItem = (idx: number, patch: Partial<ParsedItem>) =>
     setItems((prev) => prev.map((it, i) => (i === idx ? { ...it, ...patch } : it)));
+
+  // Background verification poller. buildPackage(verify=true) only STARTS the
+  // build; we poll problem.packages for each problem still 'verifying' and flip
+  // it to passed/failed when its latest package reaches READY/FAILED — without
+  // ever blocking the import of other problems.
+  useEffect(() => {
+    if (phase !== 'done') return;
+    const pending = results.filter(r => r.verifyStatus === 'verifying' && r.problemId);
+    if (pending.length === 0) return;
+
+    let cancelled = false;
+    interface Pkg { id: number; state?: string; comment?: string; creationTimeSeconds?: number }
+
+    const pollOnce = async () => {
+      for (const r of pending) {
+        if (cancelled) return;
+        try {
+          const res = await api.problem.packages(r.problemId!) as { result?: Pkg[] };
+          const pkgs = res.result || [];
+          if (pkgs.length === 0) continue;
+          const latest = pkgs.reduce((a, b) =>
+            (b.creationTimeSeconds ?? b.id) > (a.creationTimeSeconds ?? a.id) ? b : a);
+          if (latest.state === 'READY' || latest.state === 'FAILED') {
+            const status: VerifyStatus = latest.state === 'READY' ? 'passed' : 'failed';
+            setResults(prev => prev.map(x =>
+              x.problemId === r.problemId ? { ...x, verifyStatus: status, verifyComment: latest.comment } : x));
+          }
+        } catch { /* transient — try again next tick */ }
+      }
+    };
+
+    const iv = setInterval(pollOnce, 4000);
+    return () => { cancelled = true; clearInterval(iv); };
+  }, [phase, results]);
 
   const addLog = (text: string, status: LogEntry['status'] = 'pending', kind?: 'header') =>
     setLog((prev) => [...prev, { text, status, kind }]);
@@ -139,6 +198,7 @@ export default function ZipImport({ open, onClose }: Props) {
         parsedItems.push({
           fileName: file.name,
           parsed: result,
+          skip: false,
           onExists: 'fill',
           slug: result.problemName,
           timeLimit: 1000,
@@ -149,6 +209,7 @@ export default function ZipImport({ open, onClose }: Props) {
           fileName: file.name,
           parsed: null,
           parseError: err instanceof Error ? err.message : 'Failed to parse ZIP',
+          skip: false,
           onExists: 'fill',
           slug: '',
           timeLimit: 1000,
@@ -163,10 +224,17 @@ export default function ZipImport({ open, onClose }: Props) {
     const ok = parsedItems.filter(i => i.parsed).length;
     const bad = parsedItems.length - ok;
     if (bad > 0) toast('warning', `Parsed ${ok} ZIP(s); ${bad} could not be read`);
+
+    // Pre-check: fetch existing problem names so the preview can flag slug
+    // conflicts (matched locally, so it updates live as the slug is edited).
+    try {
+      const listRes = await api.problems.list({}) as { result?: Problem[] };
+      setExistingNames(new Set((listRes.result || []).map(p => p.name.toLowerCase())));
+    } catch { /* preview still works without the pre-check */ }
   };
 
   // Upload a single parsed problem. Returns step-level errors + the problem id.
-  const importProblem = async (parsed: ParsedZip, opts: ImportOpts): Promise<{ failed: boolean; errors: number; problemId?: number; skipped?: boolean }> => {
+  const importProblem = async (parsed: ParsedZip, opts: ImportOpts): Promise<{ failed: boolean; errors: number; problemId?: number; verifyRequested?: boolean }> => {
     let errors = 0;
 
     const step = async (label: string, fn: () => Promise<string | void>) => {
@@ -220,10 +288,6 @@ export default function ZipImport({ open, onClose }: Props) {
 
     // Apply the on-exists policy for a problem that already existed.
     if (existed) {
-      if (opts.onExists === 'skip') {
-        updateLastLog('done', `Skipped — "${opts.slug}" already exists (#${pid})`);
-        return { failed: false, errors: 0, problemId: pid, skipped: true };
-      }
       if (opts.onExists === 'reset') {
         updateLastLog('done', `Exists (#${pid}) — reset & overwrite`);
         await step('Discarding working copy...', async () => {
@@ -439,10 +503,11 @@ export default function ZipImport({ open, onClose }: Props) {
       });
     }
 
-    // 9 & 10. Commit + verify — only if the testset is complete. A gapped testset
-    //    would make the verify build fail with "Tests are enumerated incorrectly",
-    //    so we skip both and leave the problem uncommitted for a clean re-import.
-    if (testsComplete) {
+    // 9 & 10. Commit + verify — ONLY if every previous step succeeded. If any
+    //    step errored (or the testset is incomplete), we skip commit & verify and
+    //    leave the problem uncommitted for a clean re-import / retry.
+    let verifyRequested = false;
+    if (errors === 0 && testsComplete) {
       // Commit — required because the API can only verify a committed revision
       // (Polygon's working-copy "Verify" button is not exposed via the API).
       await step('Committing changes...', async () => {
@@ -450,27 +515,40 @@ export default function ZipImport({ open, onClose }: Props) {
         return 'Changes committed';
       });
 
-      // buildPackage with verify=true runs all solutions on all tests and the
-      // checker on stress tests to confirm the tags are valid.
-      await step('Requesting verification (build package)...', async () => {
-        await api.problem.buildPackage(pid, false, true);
-        return 'Verification build requested';
-      });
+      // Only request verification if the commit itself also succeeded.
+      if (errors === 0) {
+        // buildPackage(verify=true) only STARTS the build; we do NOT wait for it
+        // here. The batch moves on to the next problem and a background poller
+        // reports each verification's pass/fail as it completes.
+        addLog('Requesting verification (build package)...', 'running');
+        try {
+          await api.problem.buildPackage(pid, false, true);
+          updateLastLog('done', 'Verification requested (building in background)');
+          verifyRequested = true;
+        } catch (err) {
+          errors++;
+          updateLastLog('error', `Verification request failed — ${err instanceof Error ? err.message : 'Unknown error'}`);
+        }
+      }
     } else {
-      addLog('Skipped commit & verify — testset incomplete (see test error above)', 'error');
-      errors++;
+      addLog('Skipped commit & verify — an earlier step failed (fix and retry)', 'error');
     }
 
-    return { failed: false, errors, problemId: pid };
+    return { failed: false, errors, problemId: pid, verifyRequested };
   };
 
   // Run the pipeline for one parsed problem, logging a header + returning a result.
   const runImportFor = async (parsed: ParsedZip, opts: ImportOpts, headerLabel: string): Promise<ImportResult> => {
     addLog(headerLabel, 'running', 'header');
     try {
-      const { failed, errors, problemId, skipped } = await importProblem(parsed, opts);
+      const { failed, errors, problemId, verifyRequested } = await importProblem(parsed, opts);
       updateHeader(parsed.displayName, failed || errors > 0 ? 'error' : 'done');
-      return { name: parsed.displayName, slug: opts.slug, problemId, ok: !failed && errors === 0, errors, failed, skipped, parsed, opts };
+      return {
+        name: parsed.displayName, slug: opts.slug, problemId,
+        ok: !failed && errors === 0, errors, failed,
+        verifyRequested, verifyStatus: verifyRequested ? 'verifying' : undefined,
+        parsed, opts,
+      };
     } catch (err) {
       addLog(`Unexpected error: ${err instanceof Error ? err.message : 'Unknown'}`, 'error');
       updateHeader(parsed.displayName, 'error');
@@ -479,22 +557,24 @@ export default function ZipImport({ open, onClose }: Props) {
   };
 
   const announce = (rs: ImportResult[]) => {
-    const skipped = rs.filter(r => r.skipped).length;
-    const fullOk = rs.filter(r => r.ok && !r.skipped).length;
+    const fullOk = rs.filter(r => r.ok).length;
     const partial = rs.filter(r => !r.ok && !r.failed).length;
     const failed = rs.filter(r => r.failed).length;
-    const skipTxt = skipped ? `, ${skipped} skipped` : '';
     if (failed === 0 && partial === 0) {
-      toast('success', `Done: ${fullOk} imported${skipTxt}`);
+      toast('success', `Done: ${fullOk} imported — verifying in background`);
     } else {
-      toast('warning', `Done: ${fullOk} clean, ${partial} with warnings, ${failed} failed${skipTxt} — check the log`);
+      toast('warning', `Done: ${fullOk} clean, ${partial} with warnings, ${failed} failed — check the log`);
     }
   };
 
-  // Persist a run's outcomes to the local import history.
+  // Persist a run's outcomes to the local import history under one batch id
+  // (so the History view can group them by the run they came from).
   const recordHistory = (rs: ImportResult[]) => {
+    const batchId = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const ts = Date.now();
     const entries: ImportHistoryEntry[] = rs.map(r => ({
-      ts: Date.now(),
+      ts,
+      batchId,
       name: r.name,
       slug: r.slug,
       problemId: r.problemId,
@@ -504,7 +584,7 @@ export default function ZipImport({ open, onClose }: Props) {
   };
 
   const handleImport = async () => {
-    const toImport = items.filter(i => i.parsed);
+    const toImport = items.filter(i => i.parsed && !i.skip);
     if (toImport.length === 0) return;
 
     setPhase('uploading');
@@ -545,10 +625,9 @@ export default function ZipImport({ open, onClose }: Props) {
 
     for (let i = 0; i < retryable.length; i++) {
       const t = retryable[i];
-      // The problem now exists (created on the first attempt), so retry must
-      // overwrite rather than skip. Upgrade a 'skip' policy to 'fill'.
-      const retryOpts: ImportOpts = { ...t.opts, onExists: t.opts.onExists === 'skip' ? 'fill' : t.opts.onExists };
-      const res = await runImportFor(t.parsed, retryOpts, `Retry ${i + 1}/${retryable.length}: ${t.parsed.displayName}`);
+      // The problem now exists (created on the first attempt), so retry overwrites
+      // in place using its original fill/reset policy.
+      const res = await runImportFor(t.parsed, t.opts, `Retry ${i + 1}/${retryable.length}: ${t.parsed.displayName}`);
       const idx = updated.findIndex(r => r.name === res.name);
       if (idx >= 0) updated[idx] = res; else updated.push(res);
       redone.push(res);
@@ -563,27 +642,20 @@ export default function ZipImport({ open, onClose }: Props) {
 
   // Copy the slugs of every problem in the run (one per line), including
   // failed ones — the slug is what you paste to build a contest.
-  const copyImportedList = async () => {
-    if (results.length === 0) { toast('error', 'Nothing to copy yet'); return; }
-    const text = results.map(r => r.slug).join('\n');
+  const copySlugs = async (slugs: string[], label: string) => {
+    if (slugs.length === 0) { toast('error', 'Nothing to copy'); return; }
+    // CRLF so each slug lands on its own line everywhere (incl. Windows Notepad).
+    const text = slugs.join('\r\n');
     try {
       await navigator.clipboard.writeText(text);
-      toast('success', `Copied ${results.length} slug(s) to clipboard`);
+      toast('success', `Copied ${slugs.length} slug(s) ${label}`);
     } catch {
       toast('error', 'Clipboard copy failed');
     }
   };
 
-  const copyHistoryList = async () => {
-    if (history.length === 0) { toast('error', 'No history to copy'); return; }
-    const text = history.map(h => h.slug).join('\n');
-    try {
-      await navigator.clipboard.writeText(text);
-      toast('success', `Copied ${history.length} slug(s) from history`);
-    } catch {
-      toast('error', 'Clipboard copy failed');
-    }
-  };
+  const copyImportedList = () => copySlugs(results.map(r => r.slug), 'to clipboard');
+  const copyHistoryList = () => copySlugs(history.map(h => h.slug), 'from history');
 
   const handleClearHistory = () => { clearImportHistory(); setHistory([]); };
 
@@ -604,7 +676,7 @@ export default function ZipImport({ open, onClose }: Props) {
 
   const okCount = items.filter(i => i.parsed).length;
   const badCount = items.length - okCount;
-  const importCount = okCount;
+  const importCount = items.filter(i => i.parsed && !i.skip).length;
 
   return (
     <Modal
@@ -661,25 +733,42 @@ export default function ZipImport({ open, onClose }: Props) {
           {history.length === 0 ? (
             <p className="text-sm text-gray-600">No imports recorded yet.</p>
           ) : (
-            <div className="space-y-1 max-h-[24rem] overflow-y-auto pr-1">
-              {history.map((h, i) => (
-                <div key={i} className="flex items-center gap-2 text-sm py-1.5 px-2 rounded hover:bg-[#211e1a]">
-                  {h.status === 'imported'
-                    ? <CheckCircle2 className="w-3.5 h-3.5 text-green-400 flex-shrink-0" />
-                    : h.status === 'warnings'
-                      ? <AlertCircle className="w-3.5 h-3.5 text-yellow-400 flex-shrink-0" />
-                      : <X className="w-3.5 h-3.5 text-red-400 flex-shrink-0" />}
-                  <span className="text-gray-300 truncate">{h.name}</span>
-                  {h.problemId && (
-                    <a
-                      href={`https://polygon.codeforces.com/edit-start?problemId=${h.problemId}`}
-                      target="_blank" rel="noreferrer"
-                      className="text-xs font-mono text-amber-400 hover:text-amber-300 flex items-center gap-0.5 flex-shrink-0"
+            <div className="space-y-3 max-h-[24rem] overflow-y-auto pr-1">
+              {groupHistory(history).map((batch) => (
+                <div key={batch.key} className="border border-[#362f28] rounded-lg overflow-hidden">
+                  <div className="bg-[#211e1a] px-3 py-1.5 flex items-center justify-between gap-2">
+                    <span className="text-xs text-gray-400">
+                      {new Date(batch.ts).toLocaleString()} · <span className="text-gray-500">{batch.entries.length} problem{batch.entries.length !== 1 ? 's' : ''}</span>
+                    </span>
+                    <button
+                      onClick={() => copySlugs(batch.entries.map(e => e.slug), 'from this batch')}
+                      className="flex items-center gap-1 text-xs text-amber-400 hover:text-amber-300"
                     >
-                      #{h.problemId}<ExternalLink className="w-3 h-3" />
-                    </a>
-                  )}
-                  <span className="ml-auto text-xs text-gray-600 flex-shrink-0">{new Date(h.ts).toLocaleString()}</span>
+                      <Copy className="w-3 h-3" />Copy slugs
+                    </button>
+                  </div>
+                  <div className="divide-y divide-[#362f28]/40">
+                    {batch.entries.map((h, i) => (
+                      <div key={i} className="flex items-center gap-2 text-sm py-1.5 px-3">
+                        {h.status === 'imported'
+                          ? <CheckCircle2 className="w-3.5 h-3.5 text-green-400 flex-shrink-0" />
+                          : h.status === 'warnings'
+                            ? <AlertCircle className="w-3.5 h-3.5 text-yellow-400 flex-shrink-0" />
+                            : <X className="w-3.5 h-3.5 text-red-400 flex-shrink-0" />}
+                        <span className="text-gray-300 truncate">{h.name}</span>
+                        <span className="text-xs font-mono text-gray-600 truncate">{h.slug}</span>
+                        {h.problemId && (
+                          <a
+                            href={`https://polygon.codeforces.com/edit-start?problemId=${h.problemId}`}
+                            target="_blank" rel="noreferrer"
+                            className="ml-auto text-xs font-mono text-amber-400 hover:text-amber-300 flex items-center gap-0.5 flex-shrink-0"
+                          >
+                            #{h.problemId}<ExternalLink className="w-3 h-3" />
+                          </a>
+                        )}
+                      </div>
+                    ))}
+                  </div>
                 </div>
               ))}
             </div>
@@ -738,7 +827,7 @@ export default function ZipImport({ open, onClose }: Props) {
           </p>
           <div className="space-y-2 max-h-[26rem] overflow-y-auto pr-1">
             {items.map((item, idx) => (
-              <div key={idx} className={`border rounded-lg overflow-hidden ${!item.parsed ? 'border-red-500/30' : 'border-[#362f28]'}`}>
+              <div key={idx} className={`border rounded-lg overflow-hidden ${!item.parsed ? 'border-red-500/30' : item.skip ? 'border-[#2a251f] opacity-55' : 'border-[#362f28]'}`}>
                 <div className="bg-[#211e1a] px-3 py-2 flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2 min-w-0">
                     {item.parsed
@@ -749,18 +838,30 @@ export default function ZipImport({ open, onClose }: Props) {
                     </span>
                   </div>
                   {item.parsed && (
-                    <label className="flex items-center gap-1.5 text-xs text-gray-500 flex-shrink-0">
-                      If exists
-                      <select
-                        value={item.onExists}
-                        onChange={(e) => updateItem(idx, { onExists: e.target.value as OnExists })}
-                        className="bg-[#1a1714] border border-[#362f28] rounded px-2 py-1 text-xs text-gray-200 focus:outline-none focus:border-amber-500"
-                      >
-                        {(Object.keys(ON_EXISTS_LABEL) as OnExists[]).map((k) => (
-                          <option key={k} value={k}>{ON_EXISTS_LABEL[k]}</option>
-                        ))}
-                      </select>
-                    </label>
+                    <div className="flex items-center gap-3 flex-shrink-0">
+                      <label className="flex items-center gap-1.5 text-xs text-gray-500">
+                        If exists
+                        <select
+                          value={item.onExists}
+                          onChange={(e) => updateItem(idx, { onExists: e.target.value as OnExists })}
+                          disabled={item.skip}
+                          className="bg-[#1a1714] border border-[#362f28] rounded px-2 py-1 text-xs text-gray-200 focus:outline-none focus:border-amber-500 disabled:opacity-50"
+                        >
+                          {(Object.keys(ON_EXISTS_LABEL) as OnExists[]).map((k) => (
+                            <option key={k} value={k}>{ON_EXISTS_LABEL[k]}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={item.skip}
+                          onChange={(e) => updateItem(idx, { skip: e.target.checked })}
+                          className="rounded accent-amber-500"
+                        />
+                        Skip
+                      </label>
+                    </div>
                   )}
                 </div>
                 {item.parsed ? (
@@ -817,6 +918,14 @@ export default function ZipImport({ open, onClose }: Props) {
                       {!item.parsed.hasScoring && <span className="text-gray-600">no scoring → 100pts on last group</span>}
                     </div>
 
+                    {/* Slug conflict warning */}
+                    {existingNames.has(item.slug.trim().toLowerCase()) && (
+                      <div className="flex items-center gap-1.5 text-xs text-amber-400">
+                        <AlertCircle className="w-3 h-3 flex-shrink-0" />
+                        A problem with this slug already exists on Polygon — it will be <strong className="font-semibold">{ON_EXISTS_LABEL[item.onExists].toLowerCase()}</strong>, or change the slug above.
+                      </div>
+                    )}
+
                     {/* Validation warnings */}
                     {item.parsed.warnings.length > 0 && (
                       <div className="flex flex-col gap-0.5">
@@ -866,13 +975,11 @@ export default function ZipImport({ open, onClose }: Props) {
               <div className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">Summary</div>
               {results.map((r, i) => (
                 <div key={i} className="flex items-center gap-2 text-sm">
-                  {r.skipped
-                    ? <CheckCircle2 className="w-4 h-4 text-gray-500 flex-shrink-0" />
-                    : r.failed
-                      ? <X className="w-4 h-4 text-red-400 flex-shrink-0" />
-                      : r.ok
-                        ? <CheckCircle2 className="w-4 h-4 text-green-400 flex-shrink-0" />
-                        : <AlertCircle className="w-4 h-4 text-yellow-400 flex-shrink-0" />}
+                  {r.failed
+                    ? <X className="w-4 h-4 text-red-400 flex-shrink-0" />
+                    : r.ok
+                      ? <CheckCircle2 className="w-4 h-4 text-green-400 flex-shrink-0" />
+                      : <AlertCircle className="w-4 h-4 text-yellow-400 flex-shrink-0" />}
                   <span className="text-gray-300">{r.name}</span>
                   {r.problemId && (
                     <a
@@ -884,8 +991,19 @@ export default function ZipImport({ open, onClose }: Props) {
                     </a>
                   )}
                   <span className="text-xs text-gray-600">
-                    {r.skipped ? 'skipped (already exists)' : r.failed ? 'failed' : r.ok ? 'imported' : `imported with ${r.errors} warning${r.errors !== 1 ? 's' : ''}`}
+                    {r.failed ? 'failed' : r.ok ? 'imported' : `imported with ${r.errors} warning${r.errors !== 1 ? 's' : ''}`}
                   </span>
+                  {r.verifyStatus === 'verifying' && (
+                    <span className="flex items-center gap-1 text-xs text-amber-400/90">
+                      <Loader2 className="w-3 h-3 animate-spin" />verifying
+                    </span>
+                  )}
+                  {r.verifyStatus === 'passed' && (
+                    <span className="text-xs text-green-400">✓ verified</span>
+                  )}
+                  {r.verifyStatus === 'failed' && (
+                    <span className="text-xs text-red-400" title={r.verifyComment || ''}>✗ verification failed</span>
+                  )}
                   {!r.ok && (
                     <button
                       onClick={() => handleRetry([r])}
