@@ -10,6 +10,7 @@ import { Problem, SolutionTag } from '../types/polygon';
 import Modal from '../components/ui/Modal';
 import Button from '../components/ui/Button';
 import { Input, Textarea, Select } from '../components/ui/Input';
+import { extractGroupFromFilename, extractIndexFromFilename } from '../utils/testParser';
 
 interface Props {
   open: boolean;
@@ -52,7 +53,7 @@ interface StepState {
   solutions: { file: File; tag: SolutionTag; sourceType: string }[];
 
   // Step 7: Tests
-  testFiles: { index: number; input: string; filename?: string }[];
+  testFiles: { index: number; input: string; filename?: string; group?: string }[];
   testZipFile: File | null;
 }
 
@@ -195,20 +196,27 @@ export default function UploadWizard({ open, onClose }: Props) {
     upd({ testZipFile: file });
     try {
       const zip = await JSZip.loadAsync(file);
-      const items: { index: number; input: string; filename: string }[] = [];
+      // Same group-aware parsing as the ZIP importer: group from the _sN_ in the
+      // filename, sort by group then index, then reassign sequential indices.
+      const items: { input: string; filename: string; group: string; sortKey: number }[] = [];
       const fileNames = Object.keys(zip.files).sort();
       for (const name of fileNames) {
         const entry = zip.files[name];
         if (entry.dir) continue;
+        const base = name.split('/').pop() || name;
         const content = await entry.async('string');
-        const m = name.match(/[_\-]?(\d+)[_\-.]/) || name.match(/^(\d+)/);
-        const idx = m ? parseInt(m[1], 10) : items.length + 1;
-        items.push({ index: idx, input: content, filename: name });
+        const group = extractGroupFromFilename(base) || '0';
+        const idx = extractIndexFromFilename(base);
+        items.push({ input: content, filename: base, group, sortKey: idx ?? items.length + 1 });
       }
-      items.sort((a, b) => a.index - b.index);
-      items.forEach((it, i) => { it.index = i + 1; });
-      upd({ testFiles: items });
-      toast('info', `Parsed ${items.length} tests from ZIP`);
+      items.sort((a, b) => {
+        const g = Number(a.group) - Number(b.group);
+        return g !== 0 ? g : a.sortKey - b.sortKey;
+      });
+      const testFiles = items.map((it, i) => ({ index: i + 1, input: it.input, filename: it.filename, group: it.group }));
+      upd({ testFiles });
+      const groups = [...new Set(testFiles.map(t => t.group))].sort((a, b) => Number(a) - Number(b));
+      toast('info', `Parsed ${testFiles.length} tests from ZIP (groups ${groups.join(',')})`);
     } catch {
       toast('error', 'Failed to parse ZIP file');
     }
@@ -301,6 +309,7 @@ export default function UploadWizard({ open, onClose }: Props) {
               testset: 'tests',
               testIndex: t.index,
               testInput: t.input,
+              ...(t.group ? { testGroup: t.group, testUseInStatements: t.group === '0' } : {}),
               checkExisting: true,
             });
             uploaded++;
