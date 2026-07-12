@@ -613,90 +613,47 @@ export default function TestsTab({ problemId }: Props) {
     }
   };
 
-  // Derive dependencies from statement scoring section
+  // Derive BOTH dependencies and points from the statement's scoring section
+  // (one action — parses the scoring table once and applies both).
   const [deriving, setDeriving] = useState(false);
 
-  const handleDeriveDependencies = async () => {
+  const handleDeriveDepsAndPoints = async () => {
     setDeriving(true);
     try {
-      // Load statements to get scoring section
       const res = await api.problem.statements(problemId) as { result: Record<string, { scoring?: string }> };
       const stmts = res.result || {};
       const scoring = stmts['english']?.scoring || stmts[Object.keys(stmts)[0]]?.scoring || '';
       if (!scoring.trim()) {
         toast('error', 'No scoring section found in the statement. Add subtask info to the Scoring field first.');
-        setDeriving(false);
         return;
       }
 
-      // Parse scoring for dependency patterns (shared with the ZIP importer)
       const depMap = deriveDependenciesFromScoring(scoring);
-
-      if (Object.keys(depMap).length === 0) {
-        toast('error', 'Could not parse dependencies from scoring section. Expected format: "Subtask N ... depends on subtasks X, Y"');
-        setDeriving(false);
+      const pointsMap = derivePointsFromScoring(scoring);
+      if (Object.keys(depMap).length === 0 && Object.keys(pointsMap).length === 0) {
+        toast('error', 'Could not parse dependencies or points from the scoring section.');
         return;
       }
 
-      // Apply dependencies to each group
-      let applied = 0;
+      // Apply dependencies
+      let depApplied = 0;
       for (const [group, deps] of Object.entries(depMap)) {
         try {
-          await api.problem.saveTestGroup({
-            problemId,
-            testset,
-            group,
-            dependencies: deps.join(','),
-          });
-          applied++;
+          await api.problem.saveTestGroup({ problemId, testset, group, dependencies: deps.join(',') });
+          depApplied++;
         } catch {
           toast('error', `Failed to set dependencies for group ${group}`);
         }
       }
 
-      toast('success', `Derived dependencies for ${applied} group${applied > 1 ? 's' : ''}: ${Object.entries(depMap).map(([g, d]) => `${g} <- [${d.join(',')}]`).join(', ')}`);
-      await loadTestGroups();
-    } catch (e: unknown) {
-      toast('error', e instanceof Error ? e.message : 'Failed to derive dependencies');
-    } finally {
-      setDeriving(false);
-    }
-  };
-
-  // Derive points from statement scoring section
-  const [derivingPoints, setDerivingPoints] = useState(false);
-
-  const handleDerivePoints = async () => {
-    setDerivingPoints(true);
-    try {
-      // Load statements to get scoring section
-      const res = await api.problem.statements(problemId) as { result: Record<string, { scoring?: string }> };
-      const stmts = res.result || {};
-      const scoring = stmts['english']?.scoring || stmts[Object.keys(stmts)[0]]?.scoring || '';
-      if (!scoring.trim()) {
-        toast('error', 'No scoring section found in the statement. Add subtask info to the Scoring field first.');
-        setDerivingPoints(false);
-        return;
-      }
-
-      // Parse scoring for group → points mapping (shared with the ZIP importer)
-      const pointsMap = derivePointsFromScoring(scoring);
-
-      if (Object.keys(pointsMap).length === 0) {
-        toast('error', 'Could not parse points from scoring section. Expected tabular format with group & constraint & points columns.');
-        setDerivingPoints(false);
-        return;
-      }
-
-      // Apply: set points on the first test of each group
-      let applied = 0;
+      // Apply points on the first test of each group
+      let ptsApplied = 0;
       const groupFirstTest: Record<string, Test> = {};
       for (const t of tests) {
         if (t.group && pointsMap[t.group] !== undefined && !groupFirstTest[t.group]) {
           groupFirstTest[t.group] = t;
         }
       }
-
       for (const [group, pts] of Object.entries(pointsMap)) {
         const firstTest = groupFirstTest[group];
         if (!firstTest) continue;
@@ -704,26 +661,22 @@ export default function TestsTab({ problemId }: Props) {
           const inputRes = await api.problem.testInput(problemId, testset, firstTest.index);
           const inputText = typeof inputRes === 'string' ? inputRes : String(inputRes);
           await api.problem.saveTest({
-            problemId,
-            testset,
-            testIndex: firstTest.index,
-            testInput: inputText,
-            checkExisting: false,
-            testGroup: group,
-            testPoints: pts,
+            problemId, testset, testIndex: firstTest.index, testInput: inputText,
+            checkExisting: false, testGroup: group, testPoints: pts,
           });
-          applied++;
+          ptsApplied++;
         } catch {
           toast('error', `Failed to set points for group ${group}`);
         }
       }
 
-      toast('success', `Derived points for ${applied} group${applied > 1 ? 's' : ''}: ${Object.entries(pointsMap).map(([g, p]) => `G${g}=${p}pts`).join(', ')}`);
+      toast('success', `Derived — dependencies: ${depApplied} group(s), points: ${ptsApplied} group(s)`);
       await load();
+      await loadTestGroups();
     } catch (e: unknown) {
-      toast('error', e instanceof Error ? e.message : 'Failed to derive points');
+      toast('error', e instanceof Error ? e.message : 'Failed to derive from scoring');
     } finally {
-      setDerivingPoints(false);
+      setDeriving(false);
     }
   };
 
@@ -966,20 +919,10 @@ export default function TestsTab({ problemId }: Props) {
               size="sm"
               icon={<Wand2 className="w-3.5 h-3.5" />}
               loading={deriving}
-              onClick={handleDeriveDependencies}
-              title="Parse the Scoring section of the statement to auto-fill group dependencies"
+              onClick={handleDeriveDepsAndPoints}
+              title="Parse the Scoring section of the statement to auto-fill group dependencies AND points"
             >
-              Derive Dependencies
-            </Button>
-            <Button
-              variant="secondary"
-              size="sm"
-              icon={<Wand2 className="w-3.5 h-3.5" />}
-              loading={derivingPoints}
-              onClick={handleDerivePoints}
-              title="Parse the Scoring section of the statement to auto-fill group points"
-            >
-              Derive Points
+              Derive Deps & Points
             </Button>
           </div>
 
