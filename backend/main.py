@@ -127,6 +127,11 @@ def health():
 DEFAULT_SETTINGS = {
     "enable_groups": True,
     "enable_points": True,
+    # Defaults used by the ZIP importer (overridable per-batch in the UI).
+    "checker_source_type": "cpp.gcc14-64-msys2-g++23",
+    "solution_source_type": "cpp.g++17",
+    "default_time_limit": 1000,
+    "default_memory_limit": 256,
 }
 
 

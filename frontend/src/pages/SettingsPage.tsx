@@ -1,15 +1,19 @@
 import { useState, useEffect } from 'react';
-import { Key, Eye, EyeOff, CheckCircle2, ExternalLink, ToggleLeft, ToggleRight } from 'lucide-react';
-import { api } from '../api/client';
+import { Key, Eye, EyeOff, CheckCircle2, ExternalLink, ToggleLeft, ToggleRight, Save } from 'lucide-react';
+import { api, AppSettings } from '../api/client';
 import { useApp } from '../context/AppContext';
 import Button from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
 import Card from '../components/ui/Card';
 
-interface DefaultSettings {
-  enable_groups: boolean;
-  enable_points: boolean;
-}
+const DEFAULT_SETTINGS: AppSettings = {
+  enable_groups: true,
+  enable_points: true,
+  checker_source_type: 'cpp.gcc14-64-msys2-g++23',
+  solution_source_type: 'cpp.g++17',
+  default_time_limit: 1000,
+  default_memory_limit: 256,
+};
 
 export default function SettingsPage() {
   const { toast, setCredentialsSet } = useApp();
@@ -20,8 +24,9 @@ export default function SettingsPage() {
   const [saved, setSaved] = useState(false);
 
   // Default problem settings
-  const [defaults, setDefaults] = useState<DefaultSettings>({ enable_groups: true, enable_points: true });
+  const [defaults, setDefaults] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [savingDefaults, setSavingDefaults] = useState(false);
+  const [savingImport, setSavingImport] = useState(false);
 
   useEffect(() => {
     api.credentials.get().then((res) => {
@@ -30,10 +35,27 @@ export default function SettingsPage() {
         setCredentialsSet(res.has_secret);
       }
     }).catch(() => {});
-    api.settings.get().then(setDefaults).catch(() => {});
+    api.settings.get().then((s) => setDefaults({ ...DEFAULT_SETTINGS, ...s })).catch(() => {});
   }, [setCredentialsSet]);
 
-  const toggleDefault = async (key: keyof DefaultSettings) => {
+  const saveImportDefaults = async () => {
+    setSavingImport(true);
+    try {
+      await api.settings.update({
+        checker_source_type: defaults.checker_source_type,
+        solution_source_type: defaults.solution_source_type,
+        default_time_limit: Number(defaults.default_time_limit) || 1000,
+        default_memory_limit: Number(defaults.default_memory_limit) || 256,
+      });
+      toast('success', 'Import defaults saved');
+    } catch {
+      toast('error', 'Failed to save import defaults');
+    } finally {
+      setSavingImport(false);
+    }
+  };
+
+  const toggleDefault = async (key: 'enable_groups' | 'enable_points') => {
     const newValue = !defaults[key];
     const updated = { ...defaults, [key]: newValue };
     setDefaults(updated);
@@ -170,6 +192,44 @@ export default function SettingsPage() {
                 )}
               </button>
             ))}
+          </div>
+        </Card>
+
+        {/* ZIP Import Defaults */}
+        <Card title="ZIP Import Defaults">
+          <div className="space-y-4">
+            <p className="text-xs text-gray-500">
+              Applied when importing problems from ZIP. Each import can optionally override these for a single batch.
+            </p>
+            <div className="grid grid-cols-2 gap-4">
+              <Input
+                label="Checker source type"
+                value={defaults.checker_source_type}
+                onChange={(e) => setDefaults({ ...defaults, checker_source_type: e.target.value })}
+                placeholder="cpp.gcc14-64-msys2-g++23"
+              />
+              <Input
+                label="Solution source type"
+                value={defaults.solution_source_type}
+                onChange={(e) => setDefaults({ ...defaults, solution_source_type: e.target.value })}
+                placeholder="cpp.g++17"
+              />
+              <Input
+                label="Default time limit (ms)"
+                type="number"
+                value={String(defaults.default_time_limit)}
+                onChange={(e) => setDefaults({ ...defaults, default_time_limit: Number(e.target.value) })}
+              />
+              <Input
+                label="Default memory limit (MB)"
+                type="number"
+                value={String(defaults.default_memory_limit)}
+                onChange={(e) => setDefaults({ ...defaults, default_memory_limit: Number(e.target.value) })}
+              />
+            </div>
+            <Button variant="primary" size="sm" icon={<Save className="w-4 h-4" />} loading={savingImport} onClick={saveImportDefaults}>
+              Save Import Defaults
+            </Button>
           </div>
         </Card>
 

@@ -1,5 +1,14 @@
 const BASE = 'http://localhost:8000';
 
+export interface AppSettings {
+  enable_groups: boolean;
+  enable_points: boolean;
+  checker_source_type: string;
+  solution_source_type: string;
+  default_time_limit: number;
+  default_memory_limit: number;
+}
+
 export class ApiError extends Error {
   constructor(message: string, public status?: number) {
     super(message);
@@ -66,8 +75,8 @@ export const api = {
   },
 
   settings: {
-    get: () => get('/settings') as Promise<{ enable_groups: boolean; enable_points: boolean }>,
-    update: (settings: Record<string, boolean>) => post('/settings', settings),
+    get: () => get('/settings') as Promise<AppSettings>,
+    update: (settings: Partial<AppSettings>) => post('/settings', settings),
   },
 
   // ── Problems ────────────────────────────────────────────────────────────────

@@ -4,7 +4,7 @@ import {
   History, Trash2, ExternalLink,
 } from 'lucide-react';
 import JSZip from 'jszip';
-import { api } from '../api/client';
+import { api, AppSettings } from '../api/client';
 import { useApp } from '../context/AppContext';
 import { Problem } from '../types/polygon';
 import Modal from '../components/ui/Modal';
@@ -54,8 +54,16 @@ const ON_EXISTS_LABEL: Record<OnExists, string> = {
 // Background verification (buildPackage) outcome per problem.
 type VerifyStatus = 'verifying' | 'passed' | 'failed';
 
-// Polygon source type used when uploading the checker.
-const CHECKER_SOURCE_TYPE = 'cpp.gcc14-64-msys2-g++23';
+// Fallback import defaults (used until Settings load, and as the seed for the
+// optional per-batch override panel).
+const FALLBACK_SETTINGS: AppSettings = {
+  enable_groups: true,
+  enable_points: true,
+  checker_source_type: 'cpp.gcc14-64-msys2-g++23',
+  solution_source_type: 'cpp.g++17',
+  default_time_limit: 1000,
+  default_memory_limit: 256,
+};
 
 interface HistoryBatch { key: string; ts: number; entries: ImportHistoryEntry[] }
 
@@ -77,7 +85,23 @@ function groupHistory(history: ImportHistoryEntry[]): HistoryBatch[] {
 }
 
 /** Per-problem, user-editable overrides applied at import time. */
-interface ImportOpts { slug: string; timeLimit: number; memoryLimit: number; onExists: OnExists }
+interface ImportOpts {
+  slug: string;
+  timeLimit: number;
+  memoryLimit: number;
+  onExists: OnExists;
+  checkerType: string;
+  solutionType: string;
+}
+
+/** Optional per-batch override of the Settings import defaults. */
+interface BatchOverride {
+  enabled: boolean;
+  timeLimit: number;
+  memoryLimit: number;
+  checkerType: string;
+  solutionType: string;
+}
 
 interface ParsedItem {
   fileName: string;
@@ -120,6 +144,31 @@ export default function ZipImport({ open, onClose }: Props) {
   const [history, setHistory] = useState<ImportHistoryEntry[]>(() => loadImportHistory());
   // Lowercased names of problems already on Polygon (for slug-conflict warnings).
   const [existingNames, setExistingNames] = useState<Set<string>>(new Set());
+  // Import defaults from Settings + an optional per-batch override (default off).
+  const [settings, setSettings] = useState<AppSettings>(FALLBACK_SETTINGS);
+  const [batch, setBatch] = useState<BatchOverride>({
+    enabled: false,
+    timeLimit: FALLBACK_SETTINGS.default_time_limit,
+    memoryLimit: FALLBACK_SETTINGS.default_memory_limit,
+    checkerType: FALLBACK_SETTINGS.checker_source_type,
+    solutionType: FALLBACK_SETTINGS.solution_source_type,
+  });
+
+  // Load import defaults from Settings whenever the modal opens.
+  useEffect(() => {
+    if (!open) return;
+    api.settings.get().then((s) => {
+      const merged = { ...FALLBACK_SETTINGS, ...s };
+      setSettings(merged);
+      setBatch((b) => b.enabled ? b : {
+        enabled: false,
+        timeLimit: merged.default_time_limit,
+        memoryLimit: merged.default_memory_limit,
+        checkerType: merged.checker_source_type,
+        solutionType: merged.solution_source_type,
+      });
+    }).catch(() => {});
+  }, [open]);
 
   const updateItem = (idx: number, patch: Partial<ParsedItem>) =>
     setItems((prev) => prev.map((it, i) => (i === idx ? { ...it, ...patch } : it)));
@@ -201,8 +250,8 @@ export default function ZipImport({ open, onClose }: Props) {
           skip: false,
           onExists: 'fill',
           slug: result.problemName,
-          timeLimit: 1000,
-          memoryLimit: 256,
+          timeLimit: settings.default_time_limit,
+          memoryLimit: settings.default_memory_limit,
         });
       } catch (err) {
         parsedItems.push({
@@ -337,23 +386,23 @@ export default function ZipImport({ open, onClose }: Props) {
       });
     }
 
-    // 4. Upload checker (uses the msys2 g++23 source type per project convention)
+    // 4. Upload checker (source type from Settings / batch override)
     if (parsed.checkerCode) {
       await step('Uploading checker.cpp...', async () => {
         const checkerBlob = new Blob([parsed.checkerCode!], { type: 'text/plain' });
         const checkerFile = new File([checkerBlob], 'checker.cpp', { type: 'text/plain' });
-        await api.problem.saveFile(pid, 'source', 'checker.cpp', checkerFile, CHECKER_SOURCE_TYPE);
+        await api.problem.saveFile(pid, 'source', 'checker.cpp', checkerFile, opts.checkerType);
         await api.problem.setChecker(pid, 'checker.cpp');
         return 'Checker uploaded & set';
       });
     }
 
-    // 4b. Upload validator (optional)
+    // 4b. Upload validator (optional; same source type as the checker)
     if (parsed.validatorCode) {
       await step('Uploading validator.cpp...', async () => {
         const vBlob = new Blob([parsed.validatorCode!], { type: 'text/plain' });
         const vFile = new File([vBlob], 'validator.cpp', { type: 'text/plain' });
-        await api.problem.saveFile(pid, 'source', 'validator.cpp', vFile, 'cpp.g++17');
+        await api.problem.saveFile(pid, 'source', 'validator.cpp', vFile, opts.checkerType);
         await api.problem.setValidator(pid, 'validator.cpp');
         return 'Validator uploaded & set';
       });
@@ -364,7 +413,7 @@ export default function ZipImport({ open, onClose }: Props) {
       await step('Uploading solution.cpp [MA]...', async () => {
         const solBlob = new Blob([parsed.solutionCode!], { type: 'text/plain' });
         const solFile = new File([solBlob], 'solution.cpp', { type: 'text/plain' });
-        await api.problem.saveSolution(pid, 'solution.cpp', solFile, 'MA', 'cpp.g++17');
+        await api.problem.saveSolution(pid, 'solution.cpp', solFile, 'MA', opts.solutionType);
         return 'Solution uploaded (MA)';
       });
     }
@@ -378,7 +427,7 @@ export default function ZipImport({ open, onClose }: Props) {
           try {
             const blob = new Blob([s.code], { type: 'text/plain' });
             const file = new File([blob], s.filename, { type: 'text/plain' });
-            await api.problem.saveSolution(pid, s.filename, file, s.tag, 'cpp.g++17');
+            await api.problem.saveSolution(pid, s.filename, file, s.tag, opts.solutionType);
             uploaded++;
             labels.push(`${s.filename} [${s.tag}]`);
           } catch {
@@ -596,9 +645,12 @@ export default function ZipImport({ open, onClose }: Props) {
       const it = toImport[i];
       const opts: ImportOpts = {
         slug: it.slug.trim() || it.parsed!.problemName,
-        timeLimit: it.timeLimit,
-        memoryLimit: it.memoryLimit,
+        // Batch override (when enabled) supersedes per-item limits.
+        timeLimit: batch.enabled ? batch.timeLimit : it.timeLimit,
+        memoryLimit: batch.enabled ? batch.memoryLimit : it.memoryLimit,
         onExists: it.onExists,
+        checkerType: batch.enabled ? batch.checkerType : settings.checker_source_type,
+        solutionType: batch.enabled ? batch.solutionType : settings.solution_source_type,
       };
       runResults.push(await runImportFor(it.parsed!, opts, `Problem ${i + 1}/${toImport.length}: ${it.parsed!.displayName}`));
     }
@@ -825,6 +877,47 @@ export default function ZipImport({ open, onClose }: Props) {
             {okCount} problem{okCount !== 1 ? 's' : ''} ready to import
             {badCount > 0 && <span className="text-yellow-400"> · {badCount} could not be read</span>}
           </p>
+
+          {/* Optional per-batch override of the Settings import defaults */}
+          <div className="border border-[#362f28] rounded-lg overflow-hidden">
+            <label className="flex items-center gap-2 px-3 py-2 bg-[#211e1a] cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={batch.enabled}
+                onChange={(e) => setBatch({ ...batch, enabled: e.target.checked })}
+                className="rounded accent-amber-500"
+              />
+              <span className="text-sm text-gray-300">Override import defaults for this batch</span>
+              <span className="text-xs text-gray-600">(otherwise uses Settings)</span>
+            </label>
+            {batch.enabled && (
+              <div className="px-3 py-2.5 grid grid-cols-2 gap-3">
+                <label className="flex flex-col gap-1 text-xs text-gray-500">
+                  Checker source type
+                  <input value={batch.checkerType} onChange={(e) => setBatch({ ...batch, checkerType: e.target.value })}
+                    className="bg-[#1a1714] border border-[#362f28] rounded px-2 py-1 text-xs font-mono text-gray-200 focus:outline-none focus:border-amber-500" />
+                </label>
+                <label className="flex flex-col gap-1 text-xs text-gray-500">
+                  Solution source type
+                  <input value={batch.solutionType} onChange={(e) => setBatch({ ...batch, solutionType: e.target.value })}
+                    className="bg-[#1a1714] border border-[#362f28] rounded px-2 py-1 text-xs font-mono text-gray-200 focus:outline-none focus:border-amber-500" />
+                </label>
+                <label className="flex flex-col gap-1 text-xs text-gray-500">
+                  Time limit (ms) — applies to all
+                  <input type="number" min={250} step={250} value={batch.timeLimit}
+                    onChange={(e) => setBatch({ ...batch, timeLimit: Number(e.target.value) || 1000 })}
+                    className="bg-[#1a1714] border border-[#362f28] rounded px-2 py-1 text-xs text-gray-200 focus:outline-none focus:border-amber-500" />
+                </label>
+                <label className="flex flex-col gap-1 text-xs text-gray-500">
+                  Memory limit (MB) — applies to all
+                  <input type="number" min={64} step={64} value={batch.memoryLimit}
+                    onChange={(e) => setBatch({ ...batch, memoryLimit: Number(e.target.value) || 256 })}
+                    className="bg-[#1a1714] border border-[#362f28] rounded px-2 py-1 text-xs text-gray-200 focus:outline-none focus:border-amber-500" />
+                </label>
+              </div>
+            )}
+          </div>
+
           <div className="space-y-2 max-h-[26rem] overflow-y-auto pr-1">
             {items.map((item, idx) => (
               <div key={idx} className={`border rounded-lg overflow-hidden ${!item.parsed ? 'border-red-500/30' : item.skip ? 'border-[#2a251f] opacity-55' : 'border-[#362f28]'}`}>
