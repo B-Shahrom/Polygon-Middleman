@@ -2,11 +2,13 @@ import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Plus, Search, RefreshCw, Star, Lock, Edit3, Eye,
-  AlertCircle, Upload, ChevronLeft, ChevronRight, Archive
+  AlertCircle, Upload, ChevronLeft, ChevronRight, Archive,
+  CheckSquare, Square, GitCommit, Package, Wand2, X, Loader2,
 } from 'lucide-react';
 import { api, ApiError } from '../api/client';
 import { useApp } from '../context/AppContext';
-import { Problem } from '../types/polygon';
+import { Problem, Test } from '../types/polygon';
+import { deriveDependenciesFromScoring, derivePointsFromScoring } from '../utils/statementParser';
 import Button from '../components/ui/Button';
 import Badge from '../components/ui/Badge';
 import Modal from '../components/ui/Modal';
@@ -27,6 +29,8 @@ export default function ProblemsPage() {
   const [zipImportOpen, setZipImportOpen] = useState(false);
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(20);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [bulkRunning, setBulkRunning] = useState(false);
 
   const loadProblems = useCallback(async () => {
     setLoading(true);
@@ -98,6 +102,84 @@ export default function ProblemsPage() {
     setSelectedProblem(p);
     navigate(`/problems/${p.id}`);
   };
+
+  // ── Bulk selection + actions ────────────────────────────────────────────────
+
+  const toggleSelect = (id: number) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+
+  const pageIds = paged.map((p) => p.id);
+  const allPageSelected = pageIds.length > 0 && pageIds.every((id) => selected.has(id));
+  const toggleSelectPage = () =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (allPageSelected) pageIds.forEach((id) => next.delete(id));
+      else pageIds.forEach((id) => next.add(id));
+      return next;
+    });
+
+  // Derive dependencies + points for one problem from its statement scoring.
+  const deriveDepsPointsFor = async (problemId: number): Promise<boolean> => {
+    const res = await api.problem.statements(problemId) as { result: Record<string, { scoring?: string }> };
+    const stmts = res.result || {};
+    const scoring = stmts['english']?.scoring || stmts[Object.keys(stmts)[0]]?.scoring || '';
+    if (!scoring.trim()) return false;
+    const depMap = deriveDependenciesFromScoring(scoring);
+    const pointsMap = derivePointsFromScoring(scoring);
+    if (Object.keys(depMap).length === 0 && Object.keys(pointsMap).length === 0) return false;
+
+    await api.problem.enableGroups(problemId, 'tests', true);
+    await api.problem.enablePoints(problemId, true);
+    for (const [group, deps] of Object.entries(depMap)) {
+      await api.problem.saveTestGroup({ problemId, testset: 'tests', group, dependencies: deps.join(',') });
+    }
+    if (Object.keys(pointsMap).length > 0) {
+      const testsRes = await api.problem.tests(problemId, 'tests') as { result: Test[] };
+      const tests = testsRes.result || [];
+      const groupFirst: Record<string, Test> = {};
+      for (const t of tests) {
+        if (t.group && pointsMap[t.group] !== undefined && !groupFirst[t.group]) groupFirst[t.group] = t;
+      }
+      for (const [group, pts] of Object.entries(pointsMap)) {
+        const ft = groupFirst[group];
+        if (!ft) continue;
+        const inputRes = await api.problem.testInput(problemId, 'tests', ft.index);
+        const inputText = typeof inputRes === 'string' ? inputRes : String(inputRes);
+        await api.problem.saveTest({ problemId, testset: 'tests', testIndex: ft.index, testInput: inputText, checkExisting: false, testGroup: group, testPoints: pts });
+      }
+    }
+    return true;
+  };
+
+  // Run an action over each selected problem, isolated, with a summary toast.
+  const runBulk = async (label: string, fn: (id: number) => Promise<boolean | void>) => {
+    const ids = [...selected];
+    if (ids.length === 0) return;
+    setBulkRunning(true);
+    let ok = 0; let skipped = 0; let failed = 0;
+    for (const id of ids) {
+      try {
+        const res = await fn(id);
+        if (res === false) skipped++; else ok++;
+      } catch {
+        failed++;
+      }
+    }
+    setBulkRunning(false);
+    const parts = [`${ok} ${label}`];
+    if (skipped) parts.push(`${skipped} skipped`);
+    if (failed) parts.push(`${failed} failed`);
+    toast(failed ? 'warning' : 'success', parts.join(', '));
+    await loadProblems();
+  };
+
+  const bulkCommit = () => runBulk('committed', (id) => api.problem.commitChanges(id, { message: 'Bulk commit via Polygon Middleman' }).then(() => true));
+  const bulkBuild = () => runBulk('build requested', (id) => api.problem.buildPackage(id, false, true).then(() => true));
+  const bulkDerive = () => runBulk('derived', (id) => deriveDepsPointsFor(id));
 
   const accessIcon = (access: string) => {
     if (access === 'OWNER') return <Star className="w-3.5 h-3.5 text-yellow-400" />;
@@ -184,6 +266,28 @@ export default function ProblemsPage() {
         </div>
       </div>
 
+      {/* Bulk actions bar */}
+      {selected.size > 0 && (
+        <div className="flex-shrink-0 px-6 py-2.5 border-b border-[#362f28] bg-[#1a1714] flex items-center gap-3">
+          <span className="text-sm text-gray-300">{selected.size} selected</span>
+          {bulkRunning && <Loader2 className="w-4 h-4 text-amber-400 animate-spin" />}
+          <div className="flex items-center gap-2 ml-2">
+            <Button variant="secondary" size="sm" icon={<GitCommit className="w-3.5 h-3.5" />} onClick={bulkCommit} disabled={bulkRunning}>
+              Commit
+            </Button>
+            <Button variant="secondary" size="sm" icon={<Package className="w-3.5 h-3.5" />} onClick={bulkBuild} disabled={bulkRunning}>
+              Build &amp; verify
+            </Button>
+            <Button variant="secondary" size="sm" icon={<Wand2 className="w-3.5 h-3.5" />} onClick={bulkDerive} disabled={bulkRunning}>
+              Derive deps &amp; points
+            </Button>
+          </div>
+          <button onClick={() => setSelected(new Set())} className="ml-auto flex items-center gap-1 text-xs text-gray-500 hover:text-gray-300">
+            <X className="w-3.5 h-3.5" />Clear
+          </button>
+        </div>
+      )}
+
       {/* Table */}
       <div className="flex-1 overflow-y-auto">
         {loading ? (
@@ -200,6 +304,11 @@ export default function ProblemsPage() {
           <table className="w-full">
             <thead className="sticky top-0 bg-[#1a1714] border-b border-[#362f28] z-10">
               <tr>
+                <th className="px-4 py-3 w-10">
+                  <button onClick={toggleSelectPage} className="text-gray-500 hover:text-gray-300 align-middle" title="Select all on page">
+                    {allPageSelected ? <CheckSquare className="w-4 h-4 text-amber-400" /> : <Square className="w-4 h-4" />}
+                  </button>
+                </th>
                 <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide w-20">ID</th>
                 <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Name</th>
                 <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Owner</th>
@@ -213,8 +322,13 @@ export default function ProblemsPage() {
                 <tr
                   key={p.id}
                   onClick={() => openProblem(p)}
-                  className="hover:bg-[#211e1a] cursor-pointer transition-colors group"
+                  className={`hover:bg-[#211e1a] cursor-pointer transition-colors group ${selected.has(p.id) ? 'bg-amber-500/5' : ''}`}
                 >
+                  <td className="px-4 py-3.5" onClick={(e) => { e.stopPropagation(); toggleSelect(p.id); }}>
+                    {selected.has(p.id)
+                      ? <CheckSquare className="w-4 h-4 text-amber-400" />
+                      : <Square className="w-4 h-4 text-gray-600 group-hover:text-gray-400" />}
+                  </td>
                   <td className="px-4 py-3.5 font-mono text-sm text-gray-500">#{p.id}</td>
                   <td className="px-4 py-3.5">
                     <div className="flex items-center gap-2">
