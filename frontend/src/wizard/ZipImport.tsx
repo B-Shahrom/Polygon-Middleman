@@ -54,6 +54,13 @@ const ON_EXISTS_LABEL: Record<OnExists, string> = {
 // Background verification (buildPackage) outcome per problem.
 type VerifyStatus = 'verifying' | 'passed' | 'failed';
 
+// Current-vs-incoming snapshot for an existing problem ("what changes?").
+interface DiffInfo {
+  curTests: number; newTests: number;
+  curLangs: string[]; newLangs: string[];
+  curChecker: string;
+}
+
 // Fallback import defaults (used until Settings load, and as the seed for the
 // optional per-batch override panel).
 const FALLBACK_SETTINGS: AppSettings = {
@@ -142,8 +149,11 @@ export default function ZipImport({ open, onClose }: Props) {
   const [results, setResults] = useState<ImportResult[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [history, setHistory] = useState<ImportHistoryEntry[]>(() => loadImportHistory());
-  // Lowercased names of problems already on Polygon (for slug-conflict warnings).
-  const [existingNames, setExistingNames] = useState<Set<string>>(new Set());
+  // Lowercased name → problemId for problems already on Polygon (slug-conflict
+  // warnings + the "what changes?" diff).
+  const [existingByName, setExistingByName] = useState<Map<string, number>>(new Map());
+  // Per-item change preview (keyed by item index): what a fill/reset would touch.
+  const [diffs, setDiffs] = useState<Record<number, DiffInfo | 'loading'>>({});
   // Import defaults from Settings + an optional per-batch override (default off).
   const [settings, setSettings] = useState<AppSettings>(FALLBACK_SETTINGS);
   const [batch, setBatch] = useState<BatchOverride>({
@@ -227,6 +237,8 @@ export default function ZipImport({ open, onClose }: Props) {
     if (importing) return;
     setItems([]);
     setResults([]);
+    setDiffs({});
+    setExistingByName(new Map());
     setPhase('select');
     setLog([]);
     onClose();
@@ -238,6 +250,7 @@ export default function ZipImport({ open, onClose }: Props) {
     const files = Array.from(fileList);
     e.target.value = '';
 
+    setDiffs({});
     setParsing(true);
     const parsedItems: ParsedItem[] = [];
     for (const file of files) {
@@ -274,12 +287,41 @@ export default function ZipImport({ open, onClose }: Props) {
     const bad = parsedItems.length - ok;
     if (bad > 0) toast('warning', `Parsed ${ok} ZIP(s); ${bad} could not be read`);
 
-    // Pre-check: fetch existing problem names so the preview can flag slug
-    // conflicts (matched locally, so it updates live as the slug is edited).
+    // Pre-check: fetch existing problems so the preview can flag slug conflicts
+    // (matched locally, so it updates live as the slug is edited).
     try {
       const listRes = await api.problems.list({}) as { result?: Problem[] };
-      setExistingNames(new Set((listRes.result || []).map(p => p.name.toLowerCase())));
+      const map = new Map<string, number>();
+      for (const p of listRes.result || []) map.set(p.name.toLowerCase(), p.id);
+      setExistingByName(map);
     } catch { /* preview still works without the pre-check */ }
+  };
+
+  // Fetch what a fill/reset would touch for an existing problem (tests count,
+  // statement languages, checker) so the user can see the impact before import.
+  const loadDiff = async (idx: number, problemId: number, parsed: ParsedZip) => {
+    setDiffs((d) => ({ ...d, [idx]: 'loading' }));
+    try {
+      const [testsRes, stmtRes, checkerRes] = await Promise.all([
+        api.problem.tests(problemId, 'tests', true).catch(() => ({ result: [] })),
+        api.problem.statements(problemId).catch(() => ({ result: {} })),
+        api.problem.checker(problemId).catch(() => ({ result: '' })),
+      ]);
+      const curTests = Array.isArray((testsRes as { result?: unknown }).result) ? (testsRes as { result: unknown[] }).result.length : 0;
+      const curLangs = Object.keys(((stmtRes as { result?: Record<string, unknown> }).result) || {});
+      const curChecker = String((checkerRes as { result?: unknown }).result || '') || '(none)';
+      setDiffs((d) => ({
+        ...d,
+        [idx]: {
+          curTests, newTests: parsed.tests.length,
+          curLangs, newLangs: Object.keys(parsed.languages),
+          curChecker,
+        },
+      }));
+    } catch {
+      setDiffs((d) => { const n = { ...d }; delete n[idx]; return n; });
+      toast('error', 'Failed to load current problem state');
+    }
   };
 
   // Upload a single parsed problem. Returns step-level errors + the problem id.
@@ -1011,13 +1053,35 @@ export default function ZipImport({ open, onClose }: Props) {
                       {!item.parsed.hasScoring && <span className="text-gray-600">no scoring → 100pts on last group</span>}
                     </div>
 
-                    {/* Slug conflict warning */}
-                    {existingNames.has(item.slug.trim().toLowerCase()) && (
-                      <div className="flex items-center gap-1.5 text-xs text-amber-400">
-                        <AlertCircle className="w-3 h-3 flex-shrink-0" />
-                        A problem with this slug already exists on Polygon — it will be <strong className="font-semibold">{ON_EXISTS_LABEL[item.onExists].toLowerCase()}</strong>, or change the slug above.
-                      </div>
-                    )}
+                    {/* Slug conflict warning + change preview */}
+                    {existingByName.has(item.slug.trim().toLowerCase()) && (() => {
+                      const existingId = existingByName.get(item.slug.trim().toLowerCase())!;
+                      const diff = diffs[idx];
+                      return (
+                        <div className="space-y-1.5">
+                          <div className="flex items-center gap-1.5 text-xs text-amber-400 flex-wrap">
+                            <AlertCircle className="w-3 h-3 flex-shrink-0" />
+                            Exists on Polygon (#{existingId}) — will be <strong className="font-semibold">{ON_EXISTS_LABEL[item.onExists].toLowerCase()}</strong>.
+                            <button
+                              onClick={() => diff ? setDiffs((d) => { const n = { ...d }; delete n[idx]; return n; }) : loadDiff(idx, existingId, item.parsed!)}
+                              className="underline underline-offset-2 hover:text-amber-300"
+                            >
+                              {diff ? 'hide changes' : 'what changes?'}
+                            </button>
+                          </div>
+                          {diff === 'loading' && (
+                            <div className="flex items-center gap-1.5 text-xs text-gray-500 pl-4"><Loader2 className="w-3 h-3 animate-spin" />loading current state…</div>
+                          )}
+                          {diff && diff !== 'loading' && (
+                            <div className="text-xs text-gray-400 pl-4 space-y-0.5 font-mono">
+                              <div>tests: <span className="text-gray-500">{diff.curTests}</span> → <span className="text-gray-200">{diff.newTests}</span>{diff.curTests > diff.newTests && <span className="text-yellow-400"> (⚠ {diff.curTests - diff.newTests} surplus stay unless reset+deleted)</span>}</div>
+                              <div>langs: <span className="text-gray-500">{diff.curLangs.join(',') || '—'}</span> → <span className="text-gray-200">{diff.newLangs.join(',') || '—'}</span></div>
+                              <div>checker: <span className="text-gray-500">{diff.curChecker}</span> → <span className="text-gray-200">checker.cpp</span></div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
 
                     {/* Validation warnings */}
                     {item.parsed.warnings.length > 0 && (
