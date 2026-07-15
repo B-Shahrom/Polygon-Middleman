@@ -15,7 +15,7 @@ import {
   DiffInfo, VerifyStatus, Phase, FALLBACK_SETTINGS,
 } from './zipImport/types';
 import { parseZip } from './zipImport/parseZip';
-import { sleep, saveTestWithRetry } from './zipImport/helpers';
+import { saveOneTest, findMissingTests } from './zipImport/helpers';
 import PreviewList from './zipImport/PreviewList';
 import ProgressView from './zipImport/ProgressView';
 import HistoryPanel from './zipImport/HistoryPanel';
@@ -372,29 +372,37 @@ export default function ZipImport({ open, onClose }: Props) {
     });
 
     // 7. Upload tests — every index 1..N MUST land or the testset enumeration
-    //    breaks ("Tests are enumerated incorrectly"). So: retry each test, use
-    //    checkExisting:false (duplicate-content tests must still be written), and
-    //    NEVER silently skip — a permanent failure aborts commit+verify below.
+    //    breaks ("Tests are enumerated incorrectly"). No artificial throttling:
+    //    upload everything, then verify against the platform and auto-fill any
+    //    dropped/skipped tests over a few rounds. Only give up (and abort
+    //    commit+verify) if some are still missing afterwards.
     let testsComplete = true;
     const allGroups = [...new Set(parsed.tests.map(t => t.group))].sort((a, b) => Number(a) - Number(b));
 
     if (parsed.tests.length > 0) {
       await step(`Uploading ${parsed.tests.length} tests...`, async () => {
-        const failed: number[] = [];
-        for (const t of parsed.tests) {
-          const ok = await saveTestWithRetry(pid, t);
-          if (!ok) failed.push(t.index);
-          await sleep(100); // ease Polygon's per-request rate limit
+        for (const t of parsed.tests) await saveOneTest(pid, t);
+
+        // Verify completeness and re-fill anything missing (self-heal).
+        let missing = await findMissingTests(pid, parsed.tests);
+        let rounds = 0;
+        let refilled = 0;
+        while (missing.length > 0 && rounds < 4) {
+          updateLastLog('running', `Filling ${missing.length} missing test(s) (round ${rounds + 1})...`);
+          for (const t of missing) { if (await saveOneTest(pid, t)) refilled++; }
+          missing = await findMissingTests(pid, parsed.tests);
+          rounds++;
         }
-        if (failed.length > 0) {
+
+        if (missing.length > 0) {
           testsComplete = false;
           throw new Error(
-            `${failed.length}/${parsed.tests.length} test(s) failed after retries ` +
-            `(indices ${failed.join(', ')}). Skipping commit & verify to avoid a ` +
-            `gapped testset — re-run the import to fill the gaps.`
+            `${missing.length}/${parsed.tests.length} test(s) still missing after auto-fill ` +
+            `(indices ${missing.map(t => t.index).join(', ')}). Skipping commit & verify — retry to finish.`
           );
         }
-        return `${parsed.tests.length}/${parsed.tests.length} tests uploaded`;
+        const filledNote = refilled > 0 ? ` (auto-filled ${refilled})` : '';
+        return `${parsed.tests.length}/${parsed.tests.length} tests uploaded & verified${filledNote}`;
       });
     }
 
