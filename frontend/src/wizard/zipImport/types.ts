@@ -95,7 +95,26 @@ export interface ImportResult {
   opts: ImportOpts;
 }
 
-export type Phase = 'select' | 'preview' | 'uploading' | 'done';
+export type Phase = 'select' | 'preview' | 'queue';
+
+// A single queued import (one problem). Jobs are processed by a bounded worker
+// pool; same-slug jobs are serialized. Each job keeps its own log.
+export type JobStatus = 'queued' | 'running' | 'done' | 'warnings' | 'failed';
+
+export interface ImportJob {
+  id: string;
+  batchId: string;
+  name: string;   // display name
+  slug: string;
+  parsed: ParsedZip;
+  opts: ImportOpts;
+  status: JobStatus;
+  log: LogEntry[];
+  problemId?: number;
+  errors: number;
+  verifyStatus?: VerifyStatus;
+  verifyComment?: string;
+}
 
 export interface HistoryBatch { key: string; ts: number; entries: ImportHistoryEntry[] }
 
