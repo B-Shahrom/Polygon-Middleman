@@ -47,12 +47,15 @@ export function useImportQueue(concurrency: number, onSettled: (job: ImportJob) 
         makeLogger(job.id).addLog(`Unexpected error: ${e instanceof Error ? e.message : 'Unknown'}`, 'error');
       }
       const status: JobStatus = res.failed ? 'failed' : res.errors > 0 ? 'warnings' : 'done';
+      runningSlugs.current.delete(job.slug.toLowerCase());
+      // Freeing the slug + patching the job re-renders, which re-runs the pump
+      // effect with the CURRENT concurrency. Deliberately not calling pump()
+      // here: this closure would capture a stale pump (frozen at the initial
+      // concurrency) and could overshoot a lowered limit.
       patch(job.id, {
         status, problemId: res.problemId, errors: res.errors,
         verifyStatus: res.verifyRequested ? 'verifying' : undefined,
       });
-      runningSlugs.current.delete(job.slug.toLowerCase());
-      pump();
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
