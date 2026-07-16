@@ -143,7 +143,8 @@ Click **Import ZIP** on the Problems page and select one or more `.zip` files. E
 
 ```
 edu-problem-name/           # the folder name becomes the Polygon slug
-├── problem_statement.mdx   # 4-language statement (\textbf{English} … markers)
+├── problem_statement.mdx   # multi-language statement (\textbf{English} … markers)
+├── tutorial.mdx            # optional editorial, same languages as the statement
 ├── checker.cpp
 ├── solution.cpp            # main correct → tagged MA
 ├── validator.cpp           # optional → set as validator
@@ -154,7 +155,9 @@ edu-problem-name/           # the folder name becomes the Polygon slug
     └── ...
 ```
 
-**Strict reading** — the importer only reads these components: `problem_statement.mdx` (or `.tex`), `checker.cpp`, `solution.cpp`, an optional `validator.cpp`, optional extra solutions (`.cpp` whose name starts with a tag prefix — `wa`, `tle`/`tl`/`slow`, `mle`/`ml`, `re`/`rte`, `pe`, `to`, `tm`, `ok`/`ac`/`brute`), and `input*.txt` files inside `testset/`. Everything else (editorials, generators, `.DS_Store`, answer files, etc.) is ignored.
+**Strict reading** — the importer only reads these components: `problem_statement.mdx` (or `.tex`), an optional `tutorial.mdx` (or `.tex`), `checker.cpp`, `solution.cpp`, an optional `validator.cpp`, optional extra solutions (`.cpp` whose name starts with a tag prefix — `wa`, `tle`/`tl`/`slow`, `mle`/`ml`, `re`/`rte`, `pe`, `to`, `tm`, `ok`/`ac`/`brute`), and `input*.txt` files inside `testset/`. Everything else (generators, `.DS_Store`, answer files, etc.) is ignored.
+
+**Editorials** — `tutorial.mdx` holds a LaTeX editorial split by the **same `\textbf{English}` / `\textbf{Russian}` language markers as the statement**. Each language's editorial is saved into that language's Polygon statement `tutorial` field, so the tutorial languages mirror the statement languages. The preview warns if a language is missing from (or extra in) the tutorial.
 
 **Pre-flight validation** — the preview screen flags problems before upload: missing checker/solution/tests/languages, **non-contiguous test groups** (e.g. 0,1,3 — missing 2), and scoring tables that reference groups without tests. You can also **edit the slug, time limit and memory limit per ZIP** right in the preview. A local **import history** (with Polygon links and copyable slugs) persists across sessions.
 
@@ -172,7 +175,7 @@ For every problem the importer runs an isolated pipeline:
 
 1. Creates the problem using the **full folder name as the slug** (the `edu-` prefix is kept), or a per-ZIP override
 2. Sets limits — 1000 ms / 256 MB by default, or per-ZIP overrides — with `stdin`/`stdout`
-3. Saves a statement per detected language
+3. Saves a statement per detected language, attaching each language's editorial from `tutorial.mdx`
 4. Uploads `checker.cpp` (and `validator.cpp` if present) and sets them
 5. Uploads `solution.cpp` tagged `MA`, plus any extra solutions with their prefix-detected tags (`WA`, `TL`, …)
 6. Enables groups and points, then uploads grouped tests (each test retried; duplicate-content tests still written so the `1..N` enumeration never gaps)

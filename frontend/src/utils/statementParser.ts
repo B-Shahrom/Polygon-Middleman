@@ -199,9 +199,14 @@ export function convertMdxToLatex(mdx: string): string {
   return out.join('\n');
 }
 
-export function splitMultiLanguage(raw: string): Record<string, ParsedSections> {
+/**
+ * Split a multi-language block into RAW per-language content, keyed by language
+ * code. Splits only on `\textbf{English}`-style markers — no section parsing —
+ * so it suits free-form content like tutorials/editorials as well as statements.
+ */
+export function splitMultiLanguageRaw(raw: string): Record<string, string> {
   const text = raw.replace(/\r\n/g, '\n');
-  const result: Record<string, ParsedSections> = {};
+  const result: Record<string, string> = {};
 
   const langNames = Object.keys(LANG_NAME_MAP);
   const langPattern = new RegExp(
@@ -225,10 +230,20 @@ export function splitMultiLanguage(raw: string): Record<string, ParsedSections> 
   for (let i = 0; i < positions.length; i++) {
     const start = positions[i].end;
     const end = i + 1 < positions.length ? positions[i + 1].pos : text.length;
-    const langContent = text.slice(start, end).trim();
-    result[positions[i].code] = parseLatexStatement(langContent);
+    result[positions[i].code] = text.slice(start, end).trim();
   }
 
+  return result;
+}
+
+/**
+ * Split a multi-language statement and parse each language block into sections.
+ */
+export function splitMultiLanguage(raw: string): Record<string, ParsedSections> {
+  const result: Record<string, ParsedSections> = {};
+  for (const [code, content] of Object.entries(splitMultiLanguageRaw(raw))) {
+    result[code] = parseLatexStatement(content);
+  }
   return result;
 }
 

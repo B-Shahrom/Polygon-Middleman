@@ -8,6 +8,8 @@ export interface ParsedZip {
   problemName: string;
   displayName: string;
   languages: Record<string, ParsedSections>;
+  /** Per-language editorial from tutorial.mdx, keyed by language code. */
+  tutorials: Record<string, string>;
   checkerCode: string | null;
   validatorCode: string | null;
   solutionCode: string | null;

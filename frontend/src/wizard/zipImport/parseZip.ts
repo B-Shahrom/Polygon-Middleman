@@ -1,6 +1,6 @@
 import JSZip from 'jszip';
 import {
-  convertMdxToLatex, splitMultiLanguage, parseLatexStatement, ParsedSections,
+  convertMdxToLatex, splitMultiLanguage, splitMultiLanguageRaw, parseLatexStatement, ParsedSections,
   deriveDependenciesFromScoring, derivePointsFromScoring,
 } from '../../utils/statementParser';
 import { extractGroupFromFilename } from '../../utils/testParser';
@@ -59,6 +59,7 @@ export async function parseZip(zip: JSZip): Promise<ParsedZip> {
   };
 
   const stmtPath = findByName('problem_statement.mdx', 'problem_statement.tex');
+  const tutorialPath = findByName('tutorial.mdx', 'tutorial.tex');
   const checkerPath = findByName('checker.cpp');
   const solutionPath = findByName('solution.cpp');
   const validatorPath = findByName('validator.cpp');
@@ -86,6 +87,21 @@ export async function parseZip(zip: JSZip): Promise<ParsedZip> {
     if (Object.keys(languages).length === 0) {
       // No language markers found — treat as single English statement
       languages = { english: parseLatexStatement(latex) };
+    }
+  }
+
+  // Read tutorial.mdx (or .tex) — a LaTeX editorial split by the same
+  // \textbf{English}/\textbf{Russian} language markers as the statement. Kept as
+  // raw per-language text (no section parsing) since it's free-form prose.
+  let tutorials: Record<string, string> = {};
+  if (tutorialPath) {
+    const rawTut = await zip.files[tutorialPath].async('string');
+    const isTeX = tutorialPath.toLowerCase().endsWith('.tex');
+    const latex = isTeX ? rawTut : convertMdxToLatex(rawTut);
+    tutorials = splitMultiLanguageRaw(latex);
+    if (Object.keys(tutorials).length === 0 && latex.trim()) {
+      // No language markers — treat the whole file as the English tutorial.
+      tutorials = { english: latex.trim() };
     }
   }
 
@@ -194,8 +210,20 @@ export async function parseZip(zip: JSZip): Promise<ParsedZip> {
     }
   }
 
+  // The tutorial should cover exactly the statement's languages.
+  const stmtLangs = Object.keys(languages);
+  const tutLangs = Object.keys(tutorials);
+  if (tutorialPath && tutLangs.length === 0) {
+    warnings.push('tutorial file found but no content could be parsed');
+  } else if (tutLangs.length > 0 && stmtLangs.length > 0) {
+    const missing = stmtLangs.filter(l => !tutLangs.includes(l));
+    const extra = tutLangs.filter(l => !stmtLangs.includes(l));
+    if (missing.length) warnings.push(`Tutorial missing language(s): ${missing.join(', ')}`);
+    if (extra.length) warnings.push(`Tutorial has language(s) with no statement: ${extra.join(', ')} (will be skipped)`);
+  }
+
   return {
-    problemName, displayName, languages,
+    problemName, displayName, languages, tutorials,
     checkerCode, validatorCode, solutionCode, extraSolutions,
     tests, hasScoring, scoringText, warnings,
   };

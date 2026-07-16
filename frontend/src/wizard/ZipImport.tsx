@@ -259,6 +259,7 @@ export default function ZipImport({ open, onClose }: Props) {
           <div className="text-xs text-gray-500 bg-[#1a1714] rounded-lg p-3 font-mono space-y-0.5">
             <div>edu-problem-name/</div>
             <div className="pl-4">problem_statement.mdx</div>
+            <div className="pl-4">tutorial.mdx<span className="text-gray-600">    # optional editorial, same languages</span></div>
             <div className="pl-4">checker.cpp</div>
             <div className="pl-4">solution.cpp<span className="text-gray-600">    # main → MA</span></div>
             <div className="pl-4">validator.cpp<span className="text-gray-600">   # optional</span></div>

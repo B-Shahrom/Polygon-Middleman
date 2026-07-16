@@ -91,19 +91,25 @@ export async function runImportPipeline(parsed: ParsedZip, opts: ImportOpts, log
     return 'Problem info set';
   });
 
-  // 3. Statements
+  // 3. Statements (+ the per-language tutorial/editorial, which Polygon stores
+  //    as the statement's `tutorial` field).
   const langs = Object.keys(parsed.languages);
   if (langs.length > 0) {
     await step(`Saving statements for ${langs.length} language(s)...`, async () => {
+      const withTutorial: string[] = [];
       for (const langCode of langs) {
         const s = parsed.languages[langCode];
+        const tutorial = parsed.tutorials[langCode] || '';
+        if (tutorial) withTutorial.push(langCode);
         await api.problem.saveStatement({
           problemId: pid, lang: langCode, encoding: 'UTF-8',
           name: s.name, legend: s.legend, input: s.input, output: s.output,
           scoring: s.scoring, interaction: s.interaction, notes: s.notes,
+          ...(tutorial ? { tutorial } : {}),
         });
       }
-      return `Statements saved: ${langs.join(', ')}`;
+      const tutNote = withTutorial.length > 0 ? ` · tutorial: ${withTutorial.join(', ')}` : '';
+      return `Statements saved: ${langs.join(', ')}${tutNote}`;
     });
   }
 

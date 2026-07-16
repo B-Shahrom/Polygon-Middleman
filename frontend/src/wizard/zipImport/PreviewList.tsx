@@ -135,6 +135,9 @@ export default function PreviewList({ items, updateItem, batch, setBatch, existi
                   <span className={item.parsed.checkerCode ? 'text-green-400' : 'text-yellow-400'}>checker {item.parsed.checkerCode ? '✓' : '✗'}</span>
                   <span className={item.parsed.solutionCode ? 'text-green-400' : 'text-yellow-400'}>solution {item.parsed.solutionCode ? '✓' : '✗'}</span>
                   {item.parsed.validatorCode && <span className="text-green-400">validator ✓</span>}
+                  {Object.keys(item.parsed.tutorials).length > 0 && (
+                    <span className="text-green-400">tutorial ✓ <span className="text-gray-600 capitalize">({Object.keys(item.parsed.tutorials).join(',')})</span></span>
+                  )}
                   {item.parsed.extraSolutions.length > 0 && (
                     <span className="text-gray-500">+{item.parsed.extraSolutions.length} sol ({item.parsed.extraSolutions.map(s => s.tag).join(',')})</span>
                   )}
