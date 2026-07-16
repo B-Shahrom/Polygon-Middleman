@@ -1,4 +1,72 @@
-const BASE = 'http://localhost:8000';
+// ── Origin sharding ──────────────────────────────────────────────────────────
+// Browsers cap ~6 concurrent HTTP/1.1 connections PER ORIGIN, which throttles
+// parallel imports. The backend binds 0.0.0.0, so the SAME server answers under
+// several distinct origins — and origin is scheme+host+port compared as STRINGS,
+// so "localhost" / "127.0.0.1" / "127.0.0.2" are three different origins with
+// three separate connection pools. Round-robining across them multiplies usable
+// concurrency (~6 → ~24) with no server change.
+//
+// Loopback IP literals are used because they need no DNS at all (verified: a
+// 0.0.0.0-bound server answers on 127.0.0.1/.2/.3 on Windows and Linux; macOS
+// only configures 127.0.0.1 by default). *.localhost is included as a bonus —
+// Chrome/Firefox resolve it internally, though the OS resolver often can't.
+//
+// Every candidate is probed once at startup and only pooled if it actually
+// answers, so an unusable host is simply dropped — never a hard failure. Until
+// probing finishes, everything uses the primary origin.
+const PRIMARY = 'http://localhost:8000';
+const SHARD_CANDIDATES = [
+  'http://127.0.0.1:8000',
+  'http://127.0.0.2:8000',
+  'http://127.0.0.3:8000',
+  'http://a.localhost:8000',
+  'http://b.localhost:8000',
+];
+
+let origins: string[] = [PRIMARY];
+let rr = 0;
+
+/** Round-robin the next backend origin. */
+function nextOrigin(): string {
+  const o = origins[rr % origins.length];
+  rr++;
+  return o;
+}
+
+/** Active backend origins (1 = sharding unavailable / not probed yet). */
+export function apiOriginCount(): number {
+  return origins.length;
+}
+
+async function probeShards(): Promise<void> {
+  const results = await Promise.all(SHARD_CANDIDATES.map(async (o) => {
+    try {
+      const ctl = new AbortController();
+      const t = setTimeout(() => ctl.abort(), 1500);
+      const res = await fetch(`${o}/health`, { signal: ctl.signal });
+      clearTimeout(t);
+      return res.ok ? o : null;
+    } catch {
+      return null; // hostname didn't resolve / backend unreachable on that name
+    }
+  }));
+  const usable = results.filter((o): o is string => o !== null);
+  if (usable.length > 0) origins = [PRIMARY, ...usable];
+}
+
+// The page can load before the backend is up, which would fail every probe and
+// disable sharding for the whole session — so retry once after a short delay.
+async function probeShardsWithRetry(): Promise<number> {
+  await probeShards();
+  if (origins.length === 1) {
+    await new Promise((r) => setTimeout(r, 4000));
+    await probeShards();
+  }
+  return origins.length;
+}
+
+/** Resolves with the number of usable origins once shard probing finishes. */
+export const apiOriginsReady: Promise<number> = probeShardsWithRetry();
 
 export interface AppSettings {
   enable_groups: boolean;
@@ -38,7 +106,7 @@ async function handleResponse(res: Response): Promise<unknown> {
 }
 
 async function get(path: string, params?: Record<string, string | number | boolean>) {
-  const url = new URL(`${BASE}${path}`);
+  const url = new URL(`${nextOrigin()}${path}`);
   if (params) {
     Object.entries(params).forEach(([k, v]) => {
       if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
@@ -49,7 +117,7 @@ async function get(path: string, params?: Record<string, string | number | boole
 }
 
 async function post(path: string, body: unknown) {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetch(`${nextOrigin()}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -58,7 +126,7 @@ async function post(path: string, body: unknown) {
 }
 
 async function postForm(path: string, formData: FormData) {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetch(`${nextOrigin()}${path}`, {
     method: 'POST',
     body: formData,
   });
@@ -201,7 +269,8 @@ export const api = {
     buildPackage: (problemId: number, full: boolean, verify: boolean) =>
       post('/api/problem.buildPackage', { problemId, full, verify }),
     downloadPackage: (problemId: number, packageId: number, type?: string) => {
-      const url = new URL(`${BASE}/api/problem.package`);
+      // Opens a browser window — always use the stable primary origin.
+      const url = new URL(`${PRIMARY}/api/problem.package`);
       url.searchParams.set('problemId', String(problemId));
       url.searchParams.set('packageId', String(packageId));
       if (type) url.searchParams.set('type', type);

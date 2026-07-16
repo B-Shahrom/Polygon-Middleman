@@ -188,6 +188,14 @@ For every problem the importer runs an isolated pipeline:
 
 Imports are **fault-isolated**: a failing step is logged in red and the pipeline continues; a failing problem is skipped and the rest of the batch keeps going. If any test fails to upload after retries, commit + verify are skipped so the problem stays clean for a re-import. A per-problem summary is shown at the end.
 
+### Queue & parallel agents
+
+Imports run through a **persistent queue** processed by a bounded worker pool — you can keep adding ZIP batches while others are still processing, and the queue keeps running in the background if you close the modal. **Parallel agents** (1–6, default 2) controls how many problems import at once; jobs targeting the **same slug are always serialized**, since Polygon edits one working copy per problem.
+
+Lowering the agent count never cancels running jobs — the pool simply stops launching new ones and drains to the new limit. Raising it takes effect immediately.
+
+> **Origin sharding** — browsers cap ~6 concurrent HTTP/1.1 connections *per origin*, which would throttle parallel agents. Since the backend binds `0.0.0.0`, the same server answers on several distinct origins (`localhost`, `127.0.0.1`, `127.0.0.2`, …), each with its own connection pool. The client round-robins across them for ~6 → ~24 usable connections. Origins are probed at startup and silently dropped if unavailable (macOS only configures `127.0.0.1` by default), so it degrades gracefully. The queue view shows how many origins are active.
+
 ### Multi-Language Splitting
 
 Paste a single LaTeX block with language markers (`\textbf{English}`, `\textbf{Russian}`, etc.) and click **Split Languages** to automatically parse and save to all languages.

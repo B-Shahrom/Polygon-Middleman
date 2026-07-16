@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   Loader2, CheckCircle2, AlertCircle, X, ExternalLink, RotateCcw, ChevronRight, ChevronDown, Clock,
 } from 'lucide-react';
+import { apiOriginCount, apiOriginsReady } from '../../api/client';
 import { ImportJob } from './types';
 
 interface Props {
@@ -21,6 +22,9 @@ function StatusIcon({ status }: { status: ImportJob['status'] }) {
 
 export default function QueueView({ jobs, concurrency, setConcurrency, onRetryJob }: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  // Shard probing resolves shortly after startup, so refresh once it settles.
+  const [originCount, setOriginCount] = useState(apiOriginCount());
+  useEffect(() => { apiOriginsReady.then(setOriginCount); }, []);
   const toggle = (id: string) =>
     setExpanded((prev) => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
@@ -49,8 +53,18 @@ export default function QueueView({ jobs, concurrency, setConcurrency, onRetryJo
             onChange={(e) => setConcurrency(Number(e.target.value))}
             className="bg-[#1a1714] border border-[#362f28] rounded px-2 py-1 text-xs text-gray-200 focus:outline-none focus:border-amber-500"
           >
-            {[1, 2, 3, 4].map((n) => <option key={n} value={n}>{n}</option>)}
+            {[1, 2, 3, 4, 5, 6].map((n) => <option key={n} value={n}>{n}</option>)}
           </select>
+          <span
+            className="text-gray-600"
+            title={
+              originCount > 1
+                ? `Requests are spread across ${originCount} backend origins (~${originCount * 6} concurrent connections), so agents don't contend for the browser's ~6-per-origin limit.`
+                : 'Origin sharding unavailable — no alternate loopback origin answered, so all requests share one ~6-connection pool.'
+            }
+          >
+            · {originCount} origin{originCount !== 1 ? 's' : ''}
+          </span>
         </label>
       </div>
 
