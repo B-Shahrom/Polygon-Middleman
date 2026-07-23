@@ -5,11 +5,14 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, HTMLResponse, PlainTextResponse
 
 from polygon_api import call_polygon
+import activity_log as alog
 
 app = FastAPI(title="Polygon Middleman", version="1.0.0")
+alog.install_logging()
+alog.record("server", "server", "Backend started")
 
 
 # ── Pretty Logging ────────────────────────────────────────────────────────────
@@ -21,11 +24,12 @@ def _log_request(method: str, params: dict, files: dict | None = None):
     if files:
         file_names = [f"{k} ({fn})" for k, (fn, _, _) in files.items()]
         file_info = f"  files: {', '.join(file_names)}"
-    # Filter out noisy/internal params
+    # Filter out noisy/internal params (also drops the signing key/secret).
     display = {k: v for k, v in params.items() if k not in ("apiKey", "apiSig", "time")}
     param_str = ", ".join(f"{k}={v}" for k, v in display.items()) if display else "(none)"
     print(f"\n>> [{ts}] {method}")
     print(f"   params: {param_str}{file_info}")
+    alog.record("api", method, f"call · {param_str}{file_info}")
 
 
 def _log_response(method: str, body: bytes, content_type: str):
@@ -37,23 +41,25 @@ def _log_response(method: str, body: bytes, content_type: str):
         if status == "OK":
             result = data.get("result")
             if isinstance(result, list):
-                print(f"OK [{ts}] {method} -> OK ({len(result)} items)")
+                summary = f"OK ({len(result)} items)"
             elif isinstance(result, dict):
-                print(f"OK [{ts}] {method} -> OK (object)")
+                summary = "OK (object)"
             elif result is not None:
-                print(f"OK [{ts}] {method} -> OK: {str(result)[:120]}")
+                summary = f"OK: {str(result)[:120]}"
             else:
-                print(f"OK [{ts}] {method} -> OK")
+                summary = "OK"
+            print(f"OK [{ts}] {method} -> {summary}")
+            alog.record("ok", method, summary)
         else:
             comment = data.get("comment", "Unknown error")
             print(f"ERR [{ts}] {method} -> FAILED: {comment}")
+            alog.record("error", method, f"FAILED: {comment}")
     except (json.JSONDecodeError, UnicodeDecodeError):
         # Binary response (e.g. file download, package)
         size = len(body)
-        if size > 1024:
-            print(f"BIN [{ts}] {method} -> {size / 1024:.1f} KB ({content_type})")
-        else:
-            print(f"BIN [{ts}] {method} -> {size} bytes ({content_type})")
+        human = f"{size / 1024:.1f} KB" if size > 1024 else f"{size} bytes"
+        print(f"BIN [{ts}] {method} -> {human} ({content_type})")
+        alog.record("api", method, f"{human} ({content_type})")
 
 app.add_middleware(
     CORSMiddleware,
@@ -61,6 +67,71 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Paths that would spam the log (the log page and its own polling) — never record.
+_LOG_QUIET = ("/", "/health", "/favicon.ico")
+
+
+@app.middleware("http")
+async def _activity_middleware(request: Request, call_next):
+    """Record every incoming request's method/path/status/duration. Bodies are
+    never touched, so credentials in POST payloads are never logged."""
+    path = request.url.path
+    start = _time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception as e:
+        alog.record("error", "http", f"{request.method} {path} → unhandled {type(e).__name__}: {e}")
+        raise
+    if path not in _LOG_QUIET and not path.startswith("/api/logs"):
+        dur = (_time.perf_counter() - start) * 1000
+        code = response.status_code
+        level = "error" if code >= 500 else "warn" if code >= 400 else "req"
+        alog.record(level, "http", f"{request.method} {path} → {code} ({dur:.0f}ms)")
+    return response
+
+
+def _server_status() -> dict:
+    st = alog.stats()
+    return {
+        "version": app.version,
+        "uptime_s": st["uptime_s"],
+        "log_count": st["count"],
+        "error_count": st["errors"],
+        "credentials_set": bool(_config.get("api_key") and _config.get("api_secret")),
+        "cf_login_set": bool(_config.get("cf_login") and _config.get("cf_password")),
+    }
+
+
+@app.get("/", response_class=HTMLResponse)
+def activity_page():
+    """The live, human-readable backend log (watch it; copy it into a bug report)."""
+    return HTMLResponse(alog.PAGE_HTML)
+
+
+@app.get("/api/logs")
+def api_logs(since: int = 0):
+    return {"entries": alog.snapshot(since), "server": _server_status()}
+
+
+@app.get("/api/logs.txt", response_class=PlainTextResponse)
+def api_logs_text(download: int = 0):
+    s = _server_status()
+    header = alog.report_header({
+        "backend version": s["version"],
+        "API credentials": "set" if s["credentials_set"] else "NOT set",
+        "CF web login": "set" if s["cf_login_set"] else "NOT set",
+    })
+    body = header + "\n" + alog.as_text()
+    headers = {"Content-Disposition": "attachment; filename=polygon-middleman-log.txt"} if download else None
+    return PlainTextResponse(body, headers=headers)
+
+
+@app.post("/api/logs/clear")
+def api_logs_clear():
+    alog.clear()
+    alog.record("server", "server", "Log cleared")
+    return {"status": "ok"}
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
 
@@ -642,6 +713,8 @@ def _log_collector():
     def collect(message: str, status: str):
         lines.append({"text": message, "status": status})
         print(f"   [contest] {status.upper()}: {message}")
+        level = "error" if status == "error" else "ok" if status == "done" else "contest"
+        alog.record(level, "contest", message)
     return lines, collect
 
 
@@ -660,7 +733,9 @@ async def _run_automation(coro_factory, lines: list[dict]) -> dict:
         result = await run_in_threadpool(ca.run_sync, coro_factory)
     except Exception as e:  # noqa: BLE001 — surface the real error to the client
         import traceback
-        traceback.print_exc()
+        tb = traceback.format_exc()
+        print(tb)
+        alog.record("error", "contest", f"Automation crashed: {e}\n{tb.rstrip()}")
         lines.append({"text": f"Automation crashed: {e}", "status": "error"})
         return {"ok": False, "error": str(e), "log": lines}
     return {**result, "log": lines}
