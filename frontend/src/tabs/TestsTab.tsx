@@ -272,31 +272,44 @@ export default function TestsTab({ problemId }: Props) {
   // ── ZIP Upload ────────────────────────────────────────────────────────────
 
   const handleZipSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
     try {
-      const zip = await JSZip.loadAsync(file);
+      // Pool the test inputs from every selected ZIP (a big testset may be split
+      // across several archives), then order and append them together.
       const items: PendingTest[] = [];
-      const fileNames = Object.keys(zip.files).sort();
-      for (const name of fileNames) {
-        const entry = zip.files[name];
-        if (entry.dir) continue;
-        // Skip answer/output files
-        const baseName = name.split('/').pop() || name;
-        if (/^(output|answer)/i.test(baseName)) continue;
-        const content = await entry.async('string');
-        const idx = extractIndexFromFilename(baseName) ?? items.length + 1;
-        const group = extractGroupFromFilename(baseName);
-        items.push({ index: idx, input: content, filename: baseName, group, description: baseName });
+      for (const file of Array.from(files)) {
+        const zip = await JSZip.loadAsync(file);
+        for (const name of Object.keys(zip.files).sort()) {
+          const entry = zip.files[name];
+          if (entry.dir) continue;
+          // Skip answer/output files
+          const baseName = name.split('/').pop() || name;
+          if (/^(output|answer)/i.test(baseName)) continue;
+          const content = await entry.async('string');
+          const idx = extractIndexFromFilename(baseName) ?? items.length + 1;
+          const group = extractGroupFromFilename(baseName);
+          items.push({ index: idx, input: content, filename: baseName, group, description: baseName });
+        }
       }
-      // Re-number sequentially
-      items.sort((a, b) => a.index - b.index);
+      if (items.length === 0) {
+        toast('warning', 'No test files found in the selected ZIP(s)');
+        e.target.value = '';
+        return;
+      }
+      // Order by (group, original index) across all archives, then re-number
+      // sequentially after the existing tests.
+      items.sort((a, b) => {
+        const ga = Number(a.group || '0'), gb = Number(b.group || '0');
+        if (ga !== gb) return ga - gb;
+        return a.index - b.index;
+      });
       const nextIdx = tests.length > 0 ? Math.max(...tests.map((t) => t.index)) + 1 : 1;
       items.forEach((it, i) => { it.index = nextIdx + i; });
       setPendingTests(items);
       setZipOpen(true);
     } catch {
-      toast('error', 'Failed to parse ZIP file');
+      toast('error', 'Failed to parse ZIP file(s)');
     }
     e.target.value = '';
   };
@@ -711,7 +724,7 @@ export default function TestsTab({ problemId }: Props) {
             Add Test
           </Button>
           <Button variant="secondary" size="sm" icon={<Archive className="w-3.5 h-3.5" />} onClick={() => zipRef.current?.click()}>
-            Upload ZIP
+            Upload ZIPs
           </Button>
           <Button variant="secondary" size="sm" icon={<FileText className="w-3.5 h-3.5" />} onClick={() => fileRef.current?.click()}>
             Upload Files
@@ -746,7 +759,7 @@ export default function TestsTab({ problemId }: Props) {
             )}
             Points
           </button>
-          <input ref={zipRef} type="file" accept=".zip" className="sr-only" onChange={handleZipSelect} />
+          <input ref={zipRef} type="file" accept=".zip" multiple className="sr-only" onChange={handleZipSelect} />
           <input ref={fileRef} type="file" multiple accept=".txt,.in,.inp,*" className="sr-only" onChange={handleFileSelect} />
           {/* @ts-expect-error webkitdirectory is not in React types */}
           <input ref={folderRef} type="file" webkitdirectory="" directory="" multiple className="sr-only" onChange={handleFileSelect} />
@@ -766,7 +779,7 @@ export default function TestsTab({ problemId }: Props) {
         {loading ? (
           <p className="text-gray-600 text-sm">Loading...</p>
         ) : tests.length === 0 ? (
-          <p className="text-gray-600 text-sm">No tests found. Add tests manually, upload files, or upload a ZIP archive.</p>
+          <p className="text-gray-600 text-sm">No tests found. Add tests manually, upload files, or upload ZIP archive(s).</p>
         ) : (
           <div className="divide-y divide-[#362f28]/40 -mx-5">
             {/* Header */}
