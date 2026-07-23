@@ -629,29 +629,57 @@ async def contest_problems(contestId: str):
     return await proxy("contest.problems", {"contestId": contestId})
 
 
-@app.post("/api/automation/contest")
-async def automation_contest(request: Request):
-    """Browser-automation workaround for the missing 'add to contest' API:
-    create a contest and add the given problem slugs by driving the website."""
-    from contest_automation import add_problems_to_contest
-
-    data = await request.json()
-    contest_name = (data.get("name") or "").strip()
-    slugs = [s for s in (data.get("slugs") or []) if s]
-    headful = bool(data.get("headful", True))
-    if not contest_name or not slugs:
-        raise HTTPException(status_code=400, detail="Contest name and at least one slug are required.")
-
+def _cf_web_creds() -> tuple[str, str]:
     login = _config.get("cf_login", "")
     password = _config.get("cf_password", "")
     if not login or not password:
         raise HTTPException(status_code=400, detail="Codeforces web login not set. Add it in Settings.")
+    return login, password
 
-    log_lines: list[dict] = []
+
+def _log_collector():
+    lines: list[dict] = []
     def collect(message: str, status: str):
-        entry = {"text": message, "status": status}
-        log_lines.append(entry)
+        lines.append({"text": message, "status": status})
         print(f"   [contest] {status.upper()}: {message}")
+    return lines, collect
 
-    result = await add_problems_to_contest(contest_name, slugs, login, password, headful, collect)
-    return {**result, "log": log_lines}
+
+@app.post("/api/automation/contest/list")
+async def automation_contest_list(request: Request):
+    """Browser automation: scrape the Polygon contests page."""
+    import contest_automation as ca
+    data = await request.json()
+    login, password = _cf_web_creds()
+    lines, collect = _log_collector()
+    result = await ca.list_contests(login, password, bool(data.get("headful", False)), collect)
+    return {**result, "log": lines}
+
+
+@app.post("/api/automation/contest/create")
+async def automation_contest_create(request: Request):
+    """Browser automation: create a new Polygon contest."""
+    import contest_automation as ca
+    data = await request.json()
+    name = (data.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Contest name is required.")
+    login, password = _cf_web_creds()
+    lines, collect = _log_collector()
+    result = await ca.create_contest(name, login, password, bool(data.get("headful", True)), collect)
+    return {**result, "log": lines}
+
+
+@app.post("/api/automation/contest/add")
+async def automation_contest_add(request: Request):
+    """Browser automation: add problem slugs to an existing Polygon contest."""
+    import contest_automation as ca
+    data = await request.json()
+    contest_id = str(data.get("contestId") or "").strip()
+    slugs = [s for s in (data.get("slugs") or []) if s]
+    if not contest_id or not slugs:
+        raise HTTPException(status_code=400, detail="Contest id and at least one slug are required.")
+    login, password = _cf_web_creds()
+    lines, collect = _log_collector()
+    result = await ca.add_problems(contest_id, slugs, login, password, bool(data.get("headful", True)), collect)
+    return {**result, "log": lines}

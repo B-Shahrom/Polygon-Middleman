@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
-import { LayoutList, Settings, ChevronRight, Boxes, User, PanelLeftClose, PanelLeft } from 'lucide-react';
+import { LayoutList, Settings, ChevronRight, Boxes, User, PanelLeftClose, PanelLeft, Trophy } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 
 export default function Sidebar() {
@@ -35,6 +35,15 @@ export default function Sidebar() {
             title="Problems"
           >
             <LayoutList className="w-4 h-4" />
+          </NavLink>
+          <NavLink
+            to="/contests"
+            className={({ isActive }) =>
+              `p-2.5 rounded-lg transition-colors ${isActive ? 'bg-amber-600/20 text-amber-300' : 'text-gray-500 hover:bg-[#2c2722] hover:text-gray-300'}`
+            }
+            title="Contests"
+          >
+            <Trophy className="w-4 h-4" />
           </NavLink>
         </nav>
 
@@ -110,6 +119,19 @@ export default function Sidebar() {
         >
           <LayoutList className="w-4 h-4 flex-shrink-0" />
           Problems
+        </NavLink>
+        <NavLink
+          to="/contests"
+          className={({ isActive }) =>
+            `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors group ${
+              isActive
+                ? 'bg-amber-600/20 text-amber-300'
+                : 'text-gray-400 hover:bg-[#2c2722] hover:text-gray-200'
+            }`
+          }
+        >
+          <Trophy className="w-4 h-4 flex-shrink-0" />
+          Contests
         </NavLink>
       </nav>
 

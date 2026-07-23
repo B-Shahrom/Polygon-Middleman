@@ -286,11 +286,21 @@ export const api = {
   },
 
   automation: {
-    // Browser-automation workaround for the missing "add to contest" API.
-    createContest: (name: string, slugs: string[], headful: boolean) =>
-      post('/api/automation/contest', { name, slugs, headful }) as Promise<{
-        ok: boolean; added?: string[]; failed?: string[]; contest_url?: string | null;
-        error?: string; log?: { text: string; status: string }[];
+    // Browser-automation workarounds for Polygon's missing contest API.
+    listContests: (headful: boolean) =>
+      post('/api/automation/contest/list', { headful }) as Promise<{
+        ok: boolean; contests?: { id: string; name: string; url: string }[];
+        error?: string; log?: AutomationLog;
+      }>,
+    createContest: (name: string, headful: boolean) =>
+      post('/api/automation/contest/create', { name, headful }) as Promise<{
+        ok: boolean; id?: string | null; url?: string; error?: string; log?: AutomationLog;
+      }>,
+    addProblems: (contestId: string, slugs: string[], headful: boolean) =>
+      post('/api/automation/contest/add', { contestId, slugs, headful }) as Promise<{
+        ok: boolean; added?: string[]; failed?: string[]; error?: string; log?: AutomationLog;
       }>,
   },
 };
+
+export type AutomationLog = { text: string; status: string }[];
