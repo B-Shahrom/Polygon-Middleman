@@ -18,6 +18,10 @@ export interface ParsedZip {
   hasScoring: boolean;
   scoringText: string;
   warnings: string[];
+  /** A pure test pack: only testset/ tests, no statement/checker/solution.
+   *  Such archives append tests to an existing problem without touching its
+   *  statement, scoring or group config. */
+  testsOnly: boolean;
 }
 
 export interface LogEntry { text: string; status: 'pending' | 'running' | 'done' | 'error'; kind?: 'header' }

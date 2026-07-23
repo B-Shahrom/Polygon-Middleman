@@ -2,7 +2,7 @@ import { api } from '../../api/client';
 import { Problem } from '../../types/polygon';
 import { deriveDependenciesFromScoring, derivePointsFromScoring } from '../../utils/statementParser';
 import { ParsedZip, ImportOpts, LogEntry } from './types';
-import { saveOneTest, findMissingTests } from './helpers';
+import { saveOneTest, findMissingTests, fetchExistingTests, planTestUploads, PendingTest } from './helpers';
 
 /** Job-scoped logging sink, so concurrent jobs each write to their own log. */
 export interface JobLogger {
@@ -21,6 +21,12 @@ export interface PipelineResult {
  * Import one parsed problem into Polygon. Pure of React — logs through the
  * injected logger so it can run concurrently for many jobs. Never throttles;
  * relies on findMissingTests to self-heal dropped tests.
+ *
+ * Tests are written keyed by filename (their Polygon description): an incoming
+ * test replaces the one with the same filename or appends at the tail, so
+ * several archives of one problem accumulate instead of clobbering each other.
+ * A pure test pack (`parsed.testsOnly`) only appends tests + commits, leaving
+ * the existing statement, scoring and group config untouched.
  */
 export async function runImportPipeline(parsed: ParsedZip, opts: ImportOpts, log: JobLogger): Promise<PipelineResult> {
   let errors = 0;
@@ -39,7 +45,7 @@ export async function runImportPipeline(parsed: ParsedZip, opts: ImportOpts, log
   // 1. Create-or-resolve the problem.
   let problemId: number | undefined;
   let existed = false;
-  log.addLog(`Creating problem "${opts.slug}"...`, 'running');
+  log.addLog(`${parsed.testsOnly ? 'Resolving' : 'Creating'} problem "${opts.slug}"...`, 'running');
   try {
     const createRes = await api.problems.create(opts.slug) as { result?: Problem };
     problemId = createRes.result?.id;
@@ -69,17 +75,90 @@ export async function runImportPipeline(parsed: ParsedZip, opts: ImportOpts, log
   const pid = problemId;
 
   if (existed) {
-    if (opts.onExists === 'reset') {
+    if (opts.onExists === 'reset' && !parsed.testsOnly) {
       log.updateLastLog('done', `Exists (#${pid}) — reset & overwrite`);
       await step('Discarding working copy...', async () => {
         await api.problem.discardWorkingCopy(pid);
         return 'Working copy discarded';
       });
     } else {
-      log.updateLastLog('done', `Exists (#${pid}) — filling / updating`);
+      log.updateLastLog('done', `Exists (#${pid}) — ${parsed.testsOnly ? 'appending tests' : 'filling / updating'}`);
     }
   } else {
     log.updateLastLog('done', `Created problem #${pid}`);
+  }
+
+  // ── Shared: description-keyed test upload with self-healing fill rounds ──────
+  let testsComplete = true;
+  let plan: PendingTest[] = [];
+  const uploadTests = async () => {
+    if (parsed.tests.length === 0) return;
+    await step(`Uploading ${parsed.tests.length} tests...`, async () => {
+      const existing = await fetchExistingTests(pid);
+      plan = planTestUploads(existing, parsed.tests);
+      for (const t of plan) await saveOneTest(pid, t);
+
+      let missing = await findMissingTests(pid, plan);
+      let rounds = 0;
+      let refilled = 0;
+      while (missing.length > 0 && rounds < 4) {
+        log.updateLastLog('running', `Filling ${missing.length} missing test(s) (round ${rounds + 1})...`);
+        for (const t of missing) { if (await saveOneTest(pid, t)) refilled++; }
+        missing = await findMissingTests(pid, plan);
+        rounds++;
+      }
+      if (missing.length > 0) {
+        testsComplete = false;
+        throw new Error(
+          `${missing.length}/${plan.length} test(s) still missing after auto-fill ` +
+          `(indices ${missing.map(t => t.index).join(', ')}). Skipping commit & verify — retry to finish.`
+        );
+      }
+      const existingIdx = new Set(existing.map(e => e.index));
+      const replaced = plan.filter(t => existingIdx.has(t.index)).length;
+      const added = plan.length - replaced;
+      const changeNote = existing.length > 0 ? ` (${added} new, ${replaced} replaced)` : '';
+      const filledNote = refilled > 0 ? ` · auto-filled ${refilled}` : '';
+      return `${plan.length}/${plan.length} tests uploaded & verified${changeNote}${filledNote}`;
+    });
+  };
+
+  // ── Shared: commit + verify, only if every step so far succeeded ────────────
+  let verifyRequested = false;
+  const commitAndVerify = async () => {
+    if (errors === 0 && testsComplete) {
+      await step('Committing changes...', async () => {
+        await api.problem.commitChanges(pid, { message: 'Import via Polygon Middleman' });
+        return 'Changes committed';
+      });
+      if (errors === 0) {
+        log.addLog('Requesting verification (build package)...', 'running');
+        try {
+          await api.problem.buildPackage(pid, false, true);
+          log.updateLastLog('done', 'Verification requested (building in background)');
+          verifyRequested = true;
+        } catch (err) {
+          errors++;
+          log.updateLastLog('error', `Verification request failed — ${err instanceof Error ? err.message : 'Unknown error'}`);
+        }
+      }
+    } else {
+      log.addLog('Skipped commit & verify — an earlier step failed (fix and retry)', 'error');
+    }
+  };
+
+  // ── Tests-only pack: just append tests, don't touch statement/scoring/groups ─
+  if (parsed.testsOnly) {
+    // Enable groups/points so each test's group sticks; do NOT reconfigure the
+    // existing scoring (no fallback 100pts / dependency rewrite here).
+    await step('Enabling groups and points...', async () => {
+      await api.problem.enableGroups(pid, 'tests', true);
+      await api.problem.enablePoints(pid, true);
+      return 'Groups & points enabled';
+    });
+    await uploadTests();
+    await commitAndVerify();
+    return { failed: false, errors, problemId: pid, verifyRequested };
   }
 
   // 2. Info
@@ -167,36 +246,11 @@ export async function runImportPipeline(parsed: ParsedZip, opts: ImportOpts, log
     return 'Groups & points enabled';
   });
 
-  // 7. Tests — upload all, then verify against the platform and auto-fill gaps.
-  let testsComplete = true;
-  const allGroups = [...new Set(parsed.tests.map(t => t.group))].sort((a, b) => Number(a) - Number(b));
+  // 7. Tests — description-keyed upload with self-healing fill.
+  await uploadTests();
 
-  if (parsed.tests.length > 0) {
-    await step(`Uploading ${parsed.tests.length} tests...`, async () => {
-      for (const t of parsed.tests) await saveOneTest(pid, t);
-
-      let missing = await findMissingTests(pid, parsed.tests);
-      let rounds = 0;
-      let refilled = 0;
-      while (missing.length > 0 && rounds < 4) {
-        log.updateLastLog('running', `Filling ${missing.length} missing test(s) (round ${rounds + 1})...`);
-        for (const t of missing) { if (await saveOneTest(pid, t)) refilled++; }
-        missing = await findMissingTests(pid, parsed.tests);
-        rounds++;
-      }
-      if (missing.length > 0) {
-        testsComplete = false;
-        throw new Error(
-          `${missing.length}/${parsed.tests.length} test(s) still missing after auto-fill ` +
-          `(indices ${missing.map(t => t.index).join(', ')}). Skipping commit & verify — retry to finish.`
-        );
-      }
-      const filledNote = refilled > 0 ? ` (auto-filled ${refilled})` : '';
-      return `${parsed.tests.length}/${parsed.tests.length} tests uploaded & verified${filledNote}`;
-    });
-  }
-
-  // 8. Group policies + deps + points
+  // 8. Group policies + deps + points (indices come from the upload plan).
+  const allGroups = [...new Set(plan.map(t => t.group))].sort((a, b) => Number(a) - Number(b));
   if (allGroups.length > 0) {
     await step('Configuring group policies...', async () => {
       await api.problem.enableGroups(pid, 'tests', true);
@@ -204,9 +258,9 @@ export async function runImportPipeline(parsed: ParsedZip, opts: ImportOpts, log
 
       const nonSampleGroups = allGroups.filter(g => g !== '0');
       const setGroupPoints = async (group: string, pts: number) => {
-        const t = parsed.tests.find((x) => x.group === group);
+        const t = plan.find((x) => x.group === group);
         if (!t) return false;
-        await api.problem.saveTest({ problemId: pid, testset: 'tests', testIndex: t.index, testInput: t.input, testGroup: group, testPoints: pts, checkExisting: false });
+        await api.problem.saveTest({ problemId: pid, testset: 'tests', testIndex: t.index, testInput: t.input, testGroup: group, testPoints: pts, ...(t.filename ? { testDescription: t.filename } : {}), checkExisting: false });
         return true;
       };
 
@@ -239,26 +293,7 @@ export async function runImportPipeline(parsed: ParsedZip, opts: ImportOpts, log
   }
 
   // 9 & 10. Commit + verify (only if everything succeeded).
-  let verifyRequested = false;
-  if (errors === 0 && testsComplete) {
-    await step('Committing changes...', async () => {
-      await api.problem.commitChanges(pid, { message: 'Import via Polygon Middleman' });
-      return 'Changes committed';
-    });
-    if (errors === 0) {
-      log.addLog('Requesting verification (build package)...', 'running');
-      try {
-        await api.problem.buildPackage(pid, false, true);
-        log.updateLastLog('done', 'Verification requested (building in background)');
-        verifyRequested = true;
-      } catch (err) {
-        errors++;
-        log.updateLastLog('error', `Verification request failed — ${err instanceof Error ? err.message : 'Unknown error'}`);
-      }
-    }
-  } else {
-    log.addLog('Skipped commit & verify — an earlier step failed (fix and retry)', 'error');
-  }
+  await commitAndVerify();
 
   return { failed: false, errors, problemId: pid, verifyRequested };
 }

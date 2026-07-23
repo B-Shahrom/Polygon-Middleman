@@ -222,9 +222,19 @@ export async function parseZip(zip: JSZip): Promise<ParsedZip> {
     if (extra.length) warnings.push(`Tutorial has language(s) with no statement: ${extra.join(', ')} (will be skipped)`);
   }
 
+  // A pure test pack has tests but no statement/checker/solution/validator — it
+  // just tops up an existing problem's tests.
+  const testsOnly =
+    Object.keys(languages).length === 0 &&
+    !checkerCode && !solutionCode && !validatorCode &&
+    extraSolutions.length === 0 && tests.length > 0;
+  if (testsOnly) {
+    warnings.push(`Tests-only archive (${tests.length} tests) — will append to the existing problem "${problemName}"`);
+  }
+
   return {
     problemName, displayName, languages, tutorials,
     checkerCode, validatorCode, solutionCode, extraSolutions,
-    tests, hasScoring, scoringText, warnings,
+    tests, hasScoring, scoringText, warnings, testsOnly,
   };
 }

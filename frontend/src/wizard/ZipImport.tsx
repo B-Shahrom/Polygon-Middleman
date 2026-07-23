@@ -14,6 +14,7 @@ import {
   DiffInfo, Phase, FALLBACK_SETTINGS,
 } from './zipImport/types';
 import { parseZip } from './zipImport/parseZip';
+import { mergeParsedGroup } from './zipImport/merge';
 import { useImportQueue } from './zipImport/useImportQueue';
 import PreviewList from './zipImport/PreviewList';
 import QueueView from './zipImport/QueueView';
@@ -152,29 +153,50 @@ export default function ZipImport({ open, onClose }: Props) {
     }
   };
 
-  // Turn the previewed items into queue jobs and start processing.
+  // Turn the previewed items into queue jobs and start processing. Archives that
+  // share a slug (a problem split into a main archive + one or more test packs)
+  // are merged into a SINGLE job, so their tests accumulate and the problem is
+  // committed/verified once.
   const handleQueue = () => {
     const toImport = items.filter(i => i.parsed && !i.skip);
     if (toImport.length === 0) return;
     const batchId = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-    const newJobs: ImportJob[] = toImport.map((it) => {
+
+    const bySlug = new Map<string, ParsedItem[]>();
+    for (const it of toImport) {
+      const slug = it.slug.trim() || it.parsed!.problemName;
+      const arr = bySlug.get(slug) || [];
+      arr.push(it);
+      bySlug.set(slug, arr);
+    }
+
+    const newJobs: ImportJob[] = Array.from(bySlug.entries()).map(([slug, groupItems]) => {
+      // Representative = the main archive (carries content), else the first.
+      const rep = groupItems.find(it => {
+        const p = it.parsed!;
+        return Object.keys(p.languages).length > 0 || p.checkerCode || p.solutionCode || p.validatorCode;
+      }) || groupItems[0];
+      const merged = mergeParsedGroup(groupItems.map(it => it.parsed!));
       const opts: ImportOpts = {
-        slug: it.slug.trim() || it.parsed!.problemName,
-        timeLimit: batch.enabled ? batch.timeLimit : it.timeLimit,
-        memoryLimit: batch.enabled ? batch.memoryLimit : it.memoryLimit,
-        onExists: it.onExists,
+        slug,
+        timeLimit: batch.enabled ? batch.timeLimit : rep.timeLimit,
+        memoryLimit: batch.enabled ? batch.memoryLimit : rep.memoryLimit,
+        onExists: rep.onExists,
         checkerType: batch.enabled ? batch.checkerType : settings.checker_source_type,
         solutionType: batch.enabled ? batch.solutionType : settings.solution_source_type,
       };
+      const name = groupItems.length > 1 ? `${merged.displayName} (${groupItems.length} archives)` : merged.displayName;
       return {
-        id: `job-${++jobSeq}`, batchId, name: it.parsed!.displayName, slug: opts.slug,
-        parsed: it.parsed!, opts, status: 'queued', log: [], errors: 0,
+        id: `job-${++jobSeq}`, batchId, name, slug,
+        parsed: merged, opts, status: 'queued' as const, log: [], errors: 0,
       };
     });
+
     enqueue(newJobs);
     setItems([]);
     setPhase('queue');
-    toast('info', `Queued ${newJobs.length} problem(s)`);
+    const merges = newJobs.filter((_, i) => Array.from(bySlug.values())[i].length > 1).length;
+    toast('info', `Queued ${newJobs.length} problem(s)${merges > 0 ? ` (${merges} merged from multiple archives)` : ''}`);
   };
 
   const copySlugs = async (slugs: string[], label: string) => {
@@ -268,6 +290,15 @@ export default function ZipImport({ open, onClose }: Props) {
             <div className="pl-8">input_s0_idx0.txt</div>
             <div className="pl-8">input_s1_idx0.txt</div>
             <div className="pl-8">...</div>
+          </div>
+          <div className="text-xs text-amber-300/80 bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 space-y-1">
+            <p className="font-medium text-amber-300">Big test sets: split across archives</p>
+            <p>
+              Add extra test packs named <span className="font-mono">edu-problem-name-tests.zip</span> containing only
+              <span className="font-mono"> edu-problem-name/testset/…</span>. Select the main archive and all its test
+              packs together — they merge into one problem, tests keyed by filename (append/replace, never clobbered),
+              committed &amp; verified once. Keep test indices unique across packs.
+            </p>
           </div>
           <label className="flex flex-col items-center justify-center w-full h-36 border-2 border-dashed border-[#362f28] rounded-xl cursor-pointer hover:border-amber-500/50 transition-colors bg-[#1a1714]">
             {parsing ? (

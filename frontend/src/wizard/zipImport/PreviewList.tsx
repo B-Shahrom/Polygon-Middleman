@@ -17,6 +17,14 @@ interface Props {
 const inputCls = 'bg-[#1a1714] border border-[#362f28] rounded px-2 py-1 text-xs text-gray-200 focus:outline-none focus:border-amber-500';
 
 export default function PreviewList({ items, updateItem, batch, setBatch, existingByName, diffs, loadDiff, hideDiff, okCount, badCount }: Props) {
+  // How many non-skipped archives share each slug — those merge into one problem.
+  const slugCount = new Map<string, number>();
+  for (const it of items) {
+    if (!it.parsed || it.skip) continue;
+    const s = it.slug.trim() || it.parsed.problemName;
+    slugCount.set(s, (slugCount.get(s) || 0) + 1);
+  }
+
   return (
     <div className="space-y-3">
       <p className="text-sm text-gray-400">
@@ -71,6 +79,14 @@ export default function PreviewList({ items, updateItem, batch, setBatch, existi
                 <span className="text-sm font-medium text-gray-200 truncate">
                   {item.parsed ? item.parsed.displayName : item.fileName}
                 </span>
+                {item.parsed?.testsOnly && (
+                  <span className="text-[10px] font-medium uppercase tracking-wide px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-300 flex-shrink-0">tests only</span>
+                )}
+                {item.parsed && !item.skip && (slugCount.get(item.slug.trim() || item.parsed.problemName) || 1) > 1 && (
+                  <span className="text-[10px] font-medium uppercase tracking-wide px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 flex-shrink-0">
+                    merges ×{slugCount.get(item.slug.trim() || item.parsed.problemName)}
+                  </span>
+                )}
               </div>
               {item.parsed && (
                 <div className="flex items-center gap-3 flex-shrink-0">
@@ -141,7 +157,8 @@ export default function PreviewList({ items, updateItem, batch, setBatch, existi
                   {item.parsed.extraSolutions.length > 0 && (
                     <span className="text-gray-500">+{item.parsed.extraSolutions.length} sol ({item.parsed.extraSolutions.map(s => s.tag).join(',')})</span>
                   )}
-                  {!item.parsed.hasScoring && <span className="text-gray-600">no scoring → 100pts on last group</span>}
+                  {!item.parsed.hasScoring && !item.parsed.testsOnly && <span className="text-gray-600">no scoring → 100pts on last group</span>}
+                  {item.parsed.testsOnly && <span className="text-sky-300/80">appends tests · statement &amp; scoring untouched</span>}
                 </div>
 
                 {/* Slug conflict warning + change preview */}
