@@ -9,6 +9,7 @@ import Button from '../components/ui/Button';
 import {
   loadImportHistory, appendImportHistory, clearImportHistory, ImportHistoryEntry,
 } from '../utils/importHistory';
+import { requestNotifyPermission, notify } from '../utils/notify';
 import {
   ParsedZip, ParsedItem, ImportOpts, ImportJob, BatchOverride,
   DiffInfo, Phase, FALLBACK_SETTINGS,
@@ -62,6 +63,30 @@ export default function ZipImport({ open, onClose }: Props) {
   }, []);
 
   const { jobs, enqueue, retryJob, retryFailed, clearFinished, activeCount } = useImportQueue(concurrency, recordJob);
+
+  // Desktop notification when the queue drains (active → idle). The error/warning
+  // variant is silent (no sound) so it's noticeable but not annoying. Fires even
+  // when the modal is closed, since this component stays mounted and jobs run on.
+  const wasActive = useRef(false);
+  useEffect(() => {
+    const active = jobs.some(j => j.status === 'queued' || j.status === 'running');
+    if (wasActive.current && !active && jobs.length > 0) {
+      const done = jobs.filter(j => j.status === 'done').length;
+      const warn = jobs.filter(j => j.status === 'warnings').length;
+      const failed = jobs.filter(j => j.status === 'failed').length;
+      if (failed > 0 || warn > 0) {
+        const body = [`${done} imported`, warn && `${warn} with warnings`, failed && `${failed} failed`].filter(Boolean).join(' · ');
+        if (!notify('Import queue finished with issues', body, { silent: true })) {
+          toast('warning', `Import finished — ${body}`);
+        }
+      } else {
+        if (!notify('Import queue finished', `${done} problem${done !== 1 ? 's' : ''} imported`)) {
+          toast('success', `Import finished — ${done} imported`);
+        }
+      }
+    }
+    wasActive.current = active;
+  }, [jobs, toast]);
 
   // Load import defaults from Settings whenever the modal opens.
   useEffect(() => {
@@ -193,6 +218,9 @@ export default function ZipImport({ open, onClose }: Props) {
     });
 
     enqueue(newJobs);
+    // Ask for desktop-notification permission on this user gesture, so we can
+    // ping when the queue finishes (see the settle effect above).
+    requestNotifyPermission();
     setItems([]);
     setPhase('queue');
     const merges = newJobs.filter((_, i) => Array.from(bySlug.values())[i].length > 1).length;
