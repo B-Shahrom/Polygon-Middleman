@@ -137,9 +137,12 @@ async function postForm(path: string, formData: FormData) {
 
 export const api = {
   credentials: {
-    get: () => get('/credentials') as Promise<{ api_key: string; has_secret: boolean; username: string }>,
+    get: () => get('/credentials') as Promise<{ api_key: string; has_secret: boolean; username: string; cf_login?: string; has_cf_password?: boolean }>,
     set: (api_key: string, api_secret: string, username?: string) =>
       post('/credentials', { api_key, api_secret, ...(username !== undefined ? { username } : {}) }),
+    // Codeforces web login for contest automation (password is write-only).
+    setCf: (cf_login: string, cf_password?: string) =>
+      post('/credentials', { cf_login, ...(cf_password ? { cf_password } : {}) }),
   },
 
   settings: {
@@ -280,5 +283,14 @@ export const api = {
 
   contest: {
     problems: (contestId: string) => get('/api/contest.problems', { contestId }),
+  },
+
+  automation: {
+    // Browser-automation workaround for the missing "add to contest" API.
+    createContest: (name: string, slugs: string[], headful: boolean) =>
+      post('/api/automation/contest', { name, slugs, headful }) as Promise<{
+        ok: boolean; added?: string[]; failed?: string[]; contest_url?: string | null;
+        error?: string; log?: { text: string; status: string }[];
+      }>,
   },
 };

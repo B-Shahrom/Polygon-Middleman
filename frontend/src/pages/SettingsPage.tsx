@@ -28,15 +28,38 @@ export default function SettingsPage() {
   const [savingDefaults, setSavingDefaults] = useState(false);
   const [savingImport, setSavingImport] = useState(false);
 
+  // Codeforces web login (for contest automation)
+  const [cfLogin, setCfLogin] = useState('');
+  const [cfPassword, setCfPassword] = useState('');
+  const [hasCfPassword, setHasCfPassword] = useState(false);
+  const [showCfPassword, setShowCfPassword] = useState(false);
+  const [savingCf, setSavingCf] = useState(false);
+
   useEffect(() => {
     api.credentials.get().then((res) => {
       if (res.api_key) {
         setApiKey(res.api_key);
         setCredentialsSet(res.has_secret);
       }
+      setCfLogin(res.cf_login || '');
+      setHasCfPassword(!!res.has_cf_password);
     }).catch(() => {});
     api.settings.get().then((s) => setDefaults({ ...DEFAULT_SETTINGS, ...s })).catch(() => {});
   }, [setCredentialsSet]);
+
+  const saveCf = async () => {
+    setSavingCf(true);
+    try {
+      await api.credentials.setCf(cfLogin.trim(), cfPassword || undefined);
+      if (cfPassword) setHasCfPassword(true);
+      setCfPassword('');
+      toast('success', 'Codeforces web login saved');
+    } catch {
+      toast('error', 'Failed to save Codeforces login');
+    } finally {
+      setSavingCf(false);
+    }
+  };
 
   const saveImportDefaults = async () => {
     setSavingImport(true);
@@ -192,6 +215,41 @@ export default function SettingsPage() {
                 )}
               </button>
             ))}
+          </div>
+        </Card>
+
+        {/* Codeforces Web Login */}
+        <Card title="Codeforces Web Login (contest automation)">
+          <div className="space-y-4">
+            <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-xs text-red-300">
+              Used only to drive the Polygon website for the "Add to contest" feature (Polygon has no contest API).
+              Stored in plaintext in <code className="font-mono">backend/config.json</code> (gitignored). Prefer a
+              Codeforces account you're comfortable scripting; the password is never returned by the app once saved.
+            </div>
+            <Input
+              label="Codeforces handle / email"
+              placeholder="your Codeforces login"
+              value={cfLogin}
+              onChange={(e) => setCfLogin(e.target.value)}
+            />
+            <div className="flex flex-col gap-1">
+              <label className="text-xs font-medium text-gray-400 uppercase tracking-wide">Password {hasCfPassword && <span className="text-green-400 normal-case">· saved</span>}</label>
+              <div className="relative">
+                <input
+                  type={showCfPassword ? 'text' : 'password'}
+                  placeholder={hasCfPassword ? '•••••••• (leave blank to keep)' : 'Codeforces password'}
+                  value={cfPassword}
+                  onChange={(e) => setCfPassword(e.target.value)}
+                  className="w-full bg-[#211e1a] border border-[#362f28] rounded-lg px-3 py-2 pr-10 text-gray-200 placeholder-gray-500 text-sm focus:outline-none focus:border-amber-500"
+                />
+                <button type="button" onClick={() => setShowCfPassword(!showCfPassword)} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300">
+                  {showCfPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
+            <Button variant="primary" size="sm" icon={<Save className="w-4 h-4" />} loading={savingCf} onClick={saveCf} disabled={!cfLogin.trim()}>
+              Save Codeforces Login
+            </Button>
           </div>
         </Card>
 

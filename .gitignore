@@ -29,6 +29,9 @@ env/
 # Backend config (credentials)
 backend/config.json
 
+# Playwright persistent browser profile (holds Codeforces session cookies)
+backend/.pw-profile/
+
 # Node.js
 node_modules/
 npm-debug.log

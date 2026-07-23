@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import {
   Plus, Search, RefreshCw, Star, Lock, Edit3, Eye,
   AlertCircle, Upload, ChevronLeft, ChevronRight, Archive,
-  CheckSquare, Square, GitCommit, Package, Wand2, X, Loader2, Download,
+  CheckSquare, Square, GitCommit, Package, Wand2, X, Loader2, Download, Trophy, ExternalLink,
 } from 'lucide-react';
 import { api, ApiError } from '../api/client';
 import { useApp } from '../context/AppContext';
@@ -31,6 +31,13 @@ export default function ProblemsPage() {
   const [pageSize, setPageSize] = useState(20);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [bulkRunning, setBulkRunning] = useState(false);
+  // Add-to-contest (browser automation) modal
+  const [contestOpen, setContestOpen] = useState(false);
+  const [contestName, setContestName] = useState('');
+  const [contestHeadful, setContestHeadful] = useState(true);
+  const [contestRunning, setContestRunning] = useState(false);
+  const [contestLog, setContestLog] = useState<{ text: string; status: string }[]>([]);
+  const [contestUrl, setContestUrl] = useState<string | null>(null);
 
   const loadProblems = useCallback(async () => {
     setLoading(true);
@@ -177,6 +184,31 @@ export default function ProblemsPage() {
     await loadProblems();
   };
 
+  // Add-to-contest via browser automation (Polygon has no contest API).
+  const selectedSlugs = () => problems.filter((p) => selected.has(p.id)).map((p) => p.name);
+
+  const runAddToContest = async () => {
+    if (!contestName.trim()) return;
+    const slugs = selectedSlugs();
+    setContestRunning(true);
+    setContestLog([{ text: 'Starting browser…', status: 'running' }]);
+    setContestUrl(null);
+    try {
+      const res = await api.automation.createContest(contestName.trim(), slugs, contestHeadful);
+      setContestLog(res.log || []);
+      setContestUrl(res.contest_url || null);
+      if (res.ok) toast('success', `Contest created with ${res.added?.length ?? 0} problem(s)`);
+      else toast('warning', res.error === 'playwright-missing'
+        ? 'Playwright not installed — run: playwright install chromium'
+        : 'Contest automation finished with errors — check the log');
+    } catch (e: unknown) {
+      setContestLog([{ text: e instanceof Error ? e.message : 'Automation failed', status: 'error' }]);
+      toast('error', 'Contest automation failed');
+    } finally {
+      setContestRunning(false);
+    }
+  };
+
   const bulkCommit = () => runBulk('committed', (id) => api.problem.commitChanges(id, { message: 'Bulk commit via Polygon Middleman' }).then(() => true));
   const bulkBuild = () => runBulk('build requested', (id) => api.problem.buildPackage(id, false, true).then(() => true));
   const bulkDerive = () => runBulk('derived', (id) => deriveDepsPointsFor(id));
@@ -295,6 +327,9 @@ export default function ProblemsPage() {
             </Button>
             <Button variant="secondary" size="sm" icon={<Download className="w-3.5 h-3.5" />} onClick={bulkDownload} disabled={bulkRunning}>
               Download package
+            </Button>
+            <Button variant="secondary" size="sm" icon={<Trophy className="w-3.5 h-3.5" />} onClick={() => { setContestLog([]); setContestUrl(null); setContestOpen(true); }} disabled={bulkRunning}>
+              Add to contest
             </Button>
           </div>
           <button onClick={() => setSelected(new Set())} className="ml-auto flex items-center gap-1 text-xs text-gray-500 hover:text-gray-300">
@@ -465,6 +500,48 @@ export default function ProblemsPage() {
           onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
           autoFocus
         />
+      </Modal>
+
+      {/* Add to Contest (browser automation) */}
+      <Modal
+        open={contestOpen}
+        onClose={() => { if (!contestRunning) setContestOpen(false); }}
+        title="Add to Contest"
+        size="md"
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setContestOpen(false)} disabled={contestRunning}>Close</Button>
+            <Button variant="primary" icon={<Trophy className="w-4 h-4" />} loading={contestRunning} onClick={runAddToContest} disabled={!contestName.trim()}>
+              Create &amp; add {selected.size}
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-gray-400">
+            Polygon has no contest API, so this drives the website: it logs in, creates a contest named below,
+            and adds the {selected.size} selected problem(s) by slug. Set your Codeforces web login in Settings first.
+          </p>
+          <Input label="Contest name" placeholder="e.g. edu-round-3" value={contestName} onChange={(e) => setContestName(e.target.value)} autoFocus />
+          <label className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer select-none">
+            <input type="checkbox" checked={contestHeadful} onChange={(e) => setContestHeadful(e.target.checked)} className="rounded accent-amber-500" />
+            Show the browser (headful) — recommended so you can watch and log in if needed
+          </label>
+          {contestLog.length > 0 && (
+            <div className="bg-[#1a1714] border border-[#362f28] rounded-lg p-3 max-h-60 overflow-y-auto space-y-1">
+              {contestLog.map((l, i) => (
+                <div key={i} className={`text-xs ${l.status === 'error' ? 'text-red-400' : l.status === 'done' ? 'text-gray-300' : 'text-gray-500'}`}>
+                  {l.status === 'running' && '… '}{l.text}
+                </div>
+              ))}
+              {contestUrl && (
+                <a href={contestUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs text-amber-400 hover:text-amber-300 mt-1">
+                  Open contest <ExternalLink className="w-3 h-3" />
+                </a>
+              )}
+            </div>
+          )}
+        </div>
       </Modal>
 
       {/* Upload Wizard */}

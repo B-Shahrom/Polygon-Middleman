@@ -98,10 +98,13 @@ async def proxy(method: str, params: dict, files: dict | None = None) -> Respons
 
 @app.get("/credentials")
 def get_credentials():
+    # Secrets (api_secret, cf_password) are write-only — never returned.
     return {
         "api_key": _config.get("api_key", ""),
         "has_secret": bool(_config.get("api_secret", "")),
         "username": _config.get("username", ""),
+        "cf_login": _config.get("cf_login", ""),
+        "has_cf_password": bool(_config.get("cf_password", "")),
     }
 
 
@@ -109,10 +112,19 @@ def get_credentials():
 async def set_credentials(request: Request):
     global _config
     data = await request.json()
-    _config["api_key"] = data.get("api_key", "")
-    _config["api_secret"] = data.get("api_secret", "")
+    # Merge-only: a partial save (e.g. just the CF login) must not wipe the API
+    # key. Each field is written only when its key is present in the payload.
+    if "api_key" in data:
+        _config["api_key"] = data.get("api_key", "")
+    if "api_secret" in data:
+        _config["api_secret"] = data.get("api_secret", "")
     if "username" in data:
         _config["username"] = data["username"]
+    if "cf_login" in data:
+        _config["cf_login"] = data.get("cf_login", "")
+    # Password is only overwritten when a non-empty value is sent.
+    if data.get("cf_password"):
+        _config["cf_password"] = data["cf_password"]
     save_config(_config)
     return {"status": "ok"}
 
@@ -615,3 +627,31 @@ async def problem_package(problemId: int, packageId: int, type: Optional[str] = 
 @app.get("/api/contest.problems")
 async def contest_problems(contestId: str):
     return await proxy("contest.problems", {"contestId": contestId})
+
+
+@app.post("/api/automation/contest")
+async def automation_contest(request: Request):
+    """Browser-automation workaround for the missing 'add to contest' API:
+    create a contest and add the given problem slugs by driving the website."""
+    from contest_automation import add_problems_to_contest
+
+    data = await request.json()
+    contest_name = (data.get("name") or "").strip()
+    slugs = [s for s in (data.get("slugs") or []) if s]
+    headful = bool(data.get("headful", True))
+    if not contest_name or not slugs:
+        raise HTTPException(status_code=400, detail="Contest name and at least one slug are required.")
+
+    login = _config.get("cf_login", "")
+    password = _config.get("cf_password", "")
+    if not login or not password:
+        raise HTTPException(status_code=400, detail="Codeforces web login not set. Add it in Settings.")
+
+    log_lines: list[dict] = []
+    def collect(message: str, status: str):
+        entry = {"text": message, "status": status}
+        log_lines.append(entry)
+        print(f"   [contest] {status.upper()}: {message}")
+
+    result = await add_problems_to_contest(contest_name, slugs, login, password, headful, collect)
+    return {**result, "log": log_lines}

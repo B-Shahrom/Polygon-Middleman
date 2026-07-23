@@ -86,6 +86,21 @@ Then open [http://localhost:5173](http://localhost:5173)
 2. Return to **Problems** — list loads automatically
 3. Use **Import ZIP** for one-click batch import, **Upload Wizard** for a guided flow, or click a problem to manage it
 
+## Add problems to a contest (browser automation)
+
+Polygon exposes **no API** for creating contests or adding problems to them (only read-only `contest.problems` / `contest.xml`). So the **Add to contest** bulk action drives the Polygon website with a headless/headful browser: log in → create the contest → add each selected problem by slug.
+
+Setup (one-time):
+```bash
+cd backend
+pip install -r requirements.txt   # installs playwright
+playwright install chromium       # downloads the browser (~150 MB)
+```
+
+Then set your **Codeforces web login** in **Settings** (the Polygon API key can't drive the website). Select problems on the Problems page → **Add to contest** → name it, keep **Show the browser** on the first time so you can watch it and log in if prompted.
+
+> ⚠️ This is inherently **fragile** — it depends on Polygon's page markup, so selectors may need tuning when Polygon changes its UI. Run it headful to see where it stops. The Codeforces password is stored in plaintext in the gitignored `backend/config.json` and is never returned by the app once saved — use an account you're comfortable scripting.
+
 ## Develop in the Cloud (GitHub Codespaces)
 
 This repo ships a [`.devcontainer`](.devcontainer/devcontainer.json) so you can work from any device with zero local setup. On GitHub, click **Code → Codespaces → Create codespace on main**. The container installs Python deps (into `backend/venv`) and `npm install`s the frontend automatically.
