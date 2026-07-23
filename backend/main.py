@@ -645,6 +645,27 @@ def _log_collector():
     return lines, collect
 
 
+async def _run_automation(coro_factory, lines: list[dict]) -> dict:
+    """Run a Playwright coroutine off the server's event loop and never 500.
+
+    Playwright needs a subprocess-capable loop (ProactorEventLoop on Windows),
+    which the server's loop is not — so contest_automation.run_sync spins one up
+    in a worker thread via run_in_threadpool. Any exception is caught and folded
+    into the JSON body so the response still carries CORS headers (a bare 500
+    from the error middleware would be blocked by the browser as a CORS error).
+    """
+    from fastapi.concurrency import run_in_threadpool
+    import contest_automation as ca
+    try:
+        result = await run_in_threadpool(ca.run_sync, coro_factory)
+    except Exception as e:  # noqa: BLE001 — surface the real error to the client
+        import traceback
+        traceback.print_exc()
+        lines.append({"text": f"Automation crashed: {e}", "status": "error"})
+        return {"ok": False, "error": str(e), "log": lines}
+    return {**result, "log": lines}
+
+
 @app.post("/api/automation/contest/list")
 async def automation_contest_list(request: Request):
     """Browser automation: scrape the Polygon contests page."""
@@ -652,8 +673,8 @@ async def automation_contest_list(request: Request):
     data = await request.json()
     login, password = _cf_web_creds()
     lines, collect = _log_collector()
-    result = await ca.list_contests(login, password, bool(data.get("headful", False)), collect)
-    return {**result, "log": lines}
+    headful = bool(data.get("headful", False))
+    return await _run_automation(lambda: ca.list_contests(login, password, headful, collect), lines)
 
 
 @app.post("/api/automation/contest/create")
@@ -666,8 +687,8 @@ async def automation_contest_create(request: Request):
         raise HTTPException(status_code=400, detail="Contest name is required.")
     login, password = _cf_web_creds()
     lines, collect = _log_collector()
-    result = await ca.create_contest(name, login, password, bool(data.get("headful", True)), collect)
-    return {**result, "log": lines}
+    headful = bool(data.get("headful", True))
+    return await _run_automation(lambda: ca.create_contest(name, login, password, headful, collect), lines)
 
 
 @app.post("/api/automation/contest/add")
@@ -681,5 +702,5 @@ async def automation_contest_add(request: Request):
         raise HTTPException(status_code=400, detail="Contest id and at least one slug are required.")
     login, password = _cf_web_creds()
     lines, collect = _log_collector()
-    result = await ca.add_problems(contest_id, slugs, login, password, bool(data.get("headful", True)), collect)
-    return {**result, "log": lines}
+    headful = bool(data.get("headful", True))
+    return await _run_automation(lambda: ca.add_problems(contest_id, slugs, login, password, headful, collect), lines)

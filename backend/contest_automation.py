@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import sys
 from contextlib import asynccontextmanager
 from typing import Callable
 
@@ -31,6 +32,31 @@ def _import_pw():
         return async_playwright
     except ImportError:
         return None
+
+
+def run_sync(coro_factory: Callable):
+    """Run an async Playwright coroutine on a subprocess-capable event loop.
+
+    Playwright launches the browser via asyncio subprocesses. On Windows,
+    uvicorn installs the Selector event loop, which CANNOT spawn subprocesses
+    (raises NotImplementedError) — so awaiting Playwright directly on the
+    server's loop crashes with a 500 before any browser opens. We instead run
+    the coroutine on a freshly-created ProactorEventLoop.
+
+    MUST be called from a worker thread with no running loop (e.g. via FastAPI's
+    run_in_threadpool), never on the server's event loop. `coro_factory` is a
+    zero-arg callable returning the coroutine, so it's created on this loop.
+    """
+    if sys.platform == "win32":
+        loop = asyncio.ProactorEventLoop()
+    else:
+        loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(coro_factory())
+    finally:
+        loop.close()
+        asyncio.set_event_loop(None)
 
 
 @asynccontextmanager
