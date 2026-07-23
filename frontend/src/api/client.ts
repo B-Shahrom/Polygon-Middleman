@@ -1,26 +1,26 @@
 // ── Origin sharding ──────────────────────────────────────────────────────────
 // Browsers cap ~6 concurrent HTTP/1.1 connections PER ORIGIN, which throttles
-// parallel imports. The backend binds 0.0.0.0, so the SAME server answers under
-// several distinct origins — and origin is scheme+host+port compared as STRINGS,
-// so "localhost" / "127.0.0.1" / "127.0.0.2" are three different origins with
-// three separate connection pools. Round-robining across them multiplies usable
-// concurrency (~6 → ~24) with no server change.
+// parallel imports. Origin is scheme+host+port compared as STRINGS, so the same
+// server reached via "127.0.0.1" and "localhost" is two distinct origins with
+// two separate connection pools — round-robining across them ~doubles usable
+// concurrency (~6 → ~12) with no server change.
 //
-// Loopback IP literals are used because they need no DNS at all (verified: a
-// 0.0.0.0-bound server answers on 127.0.0.1/.2/.3 on Windows and Linux; macOS
-// only configures 127.0.0.1 by default). *.localhost is included as a bonus —
-// Chrome/Firefox resolve it internally, though the OS resolver often can't.
+// IMPORTANT: the backend binds 127.0.0.1 ONLY (a deliberate security choice — it
+// has no auth). That means the ONLY hostnames that reach it are ones that resolve
+// to 127.0.0.1 under a standard resolver: "127.0.0.1" (an IP literal, never
+// ambiguous) and "localhost". We deliberately do NOT shard onto 127.0.0.2/.3
+// (a 127.0.0.1-bound socket refuses those) or *.localhost (browsers with
+// DNS-over-HTTPS or strict resolvers try real DNS for a.localhost and fail with
+// "Failed to fetch", even though curl's OS resolver maps it) — those caused
+// intermittent request failures. To scale past ~12 you must bind the server to
+// 0.0.0.0 AND add an auth layer, then reintroduce 127.0.0.2/.3 here.
 //
+// PRIMARY is the IP literal so the always-used fallback can never be misresolved.
 // Every candidate is probed once at startup and only pooled if it actually
-// answers, so an unusable host is simply dropped — never a hard failure. Until
-// probing finishes, everything uses the primary origin.
-const PRIMARY = 'http://localhost:8000';
+// answers; until probing finishes everything uses PRIMARY.
+const PRIMARY = 'http://127.0.0.1:8000';
 const SHARD_CANDIDATES = [
-  'http://127.0.0.1:8000',
-  'http://127.0.0.2:8000',
-  'http://127.0.0.3:8000',
-  'http://a.localhost:8000',
-  'http://b.localhost:8000',
+  'http://localhost:8000',
 ];
 
 let origins: string[] = [PRIMARY];
