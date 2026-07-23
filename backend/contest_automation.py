@@ -17,11 +17,17 @@ import asyncio
 import os
 import re
 import sys
+import time
 from contextlib import asynccontextmanager
 from typing import Callable
 
 POLYGON = "https://polygon.codeforces.com"
 _PROFILE_DIR = os.path.join(os.path.dirname(__file__), ".pw-profile")
+
+# How long to wait for the human to finish logging in + pass Cloudflare's
+# "Verify you are human" check in the headful window. The persistent profile
+# then remembers the session, so this cost is paid at most once per session.
+LOGIN_WAIT_SECONDS = 300
 
 Logger = Callable[[str, str], None]  # (message, status) → None
 
@@ -78,32 +84,94 @@ async def _browser(headful: bool):
             await ctx.close()
 
 
-async def _ensure_login(page, login: str, password: str, log: Logger) -> bool:
-    """Log into Polygon if not already authenticated. Returns True on success."""
-    log("Opening Polygon…", "running")
-    await page.goto(f"{POLYGON}/login", wait_until="domcontentloaded")
-
-    login_field = page.locator("input[name='login'], input#login, input[name='handleOrEmail']")
-    if await login_field.count() > 0 and await login_field.first.is_visible():
-        log("Logging in…", "running")
-        await login_field.first.fill(login)
-        await page.locator("input[type='password']").first.fill(password)
-        await page.get_by_role("button", name=re.compile("login", re.I)).first.click()
-        await page.wait_for_load_state("networkidle")
-
-    pw_visible = await page.locator("input[type='password']").count() > 0 and await page.locator("input[type='password']").first.is_visible()
-    if pw_visible:
-        log("Login failed — check your Codeforces credentials (or log in manually with headful on).", "error")
+async def _is_logged_in(page) -> bool:
+    """Best-effort check that a Polygon session is active on the current page."""
+    try:
+        url = page.url
+        if "/login" in url:
+            return False
+        title = ((await page.title()) or "").lower()
+        if "just a moment" in title or "attention required" in title:  # Cloudflare interstitial
+            return False
+        # A visible password field means a login form is showing → not authed.
+        pw = page.locator("input[type='password']")
+        if await pw.count() > 0 and await pw.first.is_visible():
+            return False
+        # Positive signals only present when authenticated on Polygon.
+        if await page.locator("a[href*='logout'], a:has-text('Logout')").count() > 0:
+            return True
+        if await page.locator("a[href*='/problems'], a[href='/contests'], a[href*='new-problem']").count() > 0:
+            return True
+    except Exception:
         return False
-    log("Authenticated", "done")
-    return True
+    return False
+
+
+async def _dump_controls(page, log: Logger) -> None:
+    """Log the visible links/buttons so blind selectors can be tuned from logs."""
+    try:
+        items = await page.eval_on_selector_all(
+            "a, button, input[type=submit], input[type=button]",
+            """els => els
+                .filter(e => e.offsetParent !== null)
+                .map(e => (e.innerText || e.value || e.getAttribute('title') || '').replace(/\\s+/g,' ').trim())
+                .filter(Boolean).slice(0, 40)""",
+        )
+        if items:
+            log("Visible controls on this page: " + " | ".join(items), "running")
+    except Exception:
+        pass
+
+
+async def _ensure_login(page, login: str, password: str, headful: bool, log: Logger) -> bool:
+    """Ensure an authenticated Polygon session.
+
+    We do NOT try to defeat Cloudflare's "Verify you are human" check — that's
+    bot-detection and scripting it is both disallowed and unreliable. Instead,
+    the persistent profile is reused: if it already has a valid session we go
+    straight through; otherwise (headful only) the human logs in + passes the
+    check once in the window while we poll for success.
+    """
+    log("Opening Polygon…", "running")
+    await page.goto(f"{POLYGON}/contests", wait_until="domcontentloaded")
+    if await _is_logged_in(page):
+        log("Using saved Polygon session", "done")
+        return True
+
+    if not headful:
+        log("No saved session and running headless. Re-run once with 'Show browser' ON, log in and pass the "
+            "'Verify you are human' check — the session is then remembered for headless runs.", "error")
+        return False
+
+    # Best-effort pre-fill so you don't retype (you still submit + pass the check).
+    try:
+        handle = page.locator("input[name='handleOrEmail'], input[name='login'], input#login").first
+        if login and await handle.count() > 0 and await handle.is_visible():
+            await handle.fill(login)
+            if password:
+                pwf = page.locator("input[type='password']").first
+                if await pwf.count() > 0 and await pwf.is_visible():
+                    await pwf.fill(password)
+    except Exception:
+        pass
+
+    log("Please log in and complete 'Verify you are human' in the browser window — "
+        f"waiting up to {LOGIN_WAIT_SECONDS // 60} min…", "running")
+    start = time.monotonic()
+    while time.monotonic() - start < LOGIN_WAIT_SECONDS:
+        if await _is_logged_in(page):
+            log("Logged in — session saved for next time", "done")
+            return True
+        await page.wait_for_timeout(2000)
+    log("Timed out waiting for manual login.", "error")
+    return False
 
 
 async def list_contests(login: str, password: str, headful: bool, log: Logger) -> dict:
     """Scrape the /contests page → [{id, name, url}]."""
     try:
         async with _browser(headful) as page:
-            if not await _ensure_login(page, login, password, log):
+            if not await _ensure_login(page, login, password, headful, log):
                 return {"ok": False, "error": "login-failed"}
             log("Loading contests…", "running")
             await page.goto(f"{POLYGON}/contests", wait_until="networkidle")
@@ -134,14 +202,29 @@ async def create_contest(name: str, login: str, password: str, headful: bool, lo
     """Create a new Polygon contest. Returns {ok, id, url}."""
     try:
         async with _browser(headful) as page:
-            if not await _ensure_login(page, login, password, log):
+            if not await _ensure_login(page, login, password, headful, log):
                 return {"ok": False, "error": "login-failed"}
             log(f"Creating contest \"{name}\"…", "running")
             await page.goto(f"{POLYGON}/contests", wait_until="domcontentloaded")
-            await page.get_by_role("link", name=re.compile("new contest", re.I)).first.click()
+
+            # Find the "New contest" control (link or button — selectors are best-effort).
+            create_ctl = page.get_by_role("link", name=re.compile("new contest|create contest", re.I))
+            if await create_ctl.count() == 0:
+                create_ctl = page.get_by_role("button", name=re.compile("new contest|create contest", re.I))
+            if await create_ctl.count() == 0:
+                log("Couldn't find a 'New contest' control on the contests page.", "error")
+                await _dump_controls(page, log)
+                return {"ok": False, "error": "control-not-found"}
+            await create_ctl.first.click()
             await page.wait_for_load_state("domcontentloaded")
-            await page.locator("input[name='name'], input#name").first.fill(name)
-            await page.get_by_role("button", name=re.compile("create", re.I)).first.click()
+
+            name_field = page.locator("input[name='name'], input#name, input[name='contestName']")
+            if await name_field.count() == 0:
+                log("Couldn't find the contest-name field on the new-contest form.", "error")
+                await _dump_controls(page, log)
+                return {"ok": False, "error": "name-field-not-found"}
+            await name_field.first.fill(name)
+            await page.get_by_role("button", name=re.compile("create|save|new", re.I)).first.click()
             await page.wait_for_load_state("networkidle")
             url = page.url
             m = re.search(r"/(?:c|contest)/(\d+)", url)
@@ -161,15 +244,21 @@ async def add_problems(contest_id: str, slugs: list[str], login: str, password: 
     failed: list[str] = []
     try:
         async with _browser(headful) as page:
-            if not await _ensure_login(page, login, password, log):
+            if not await _ensure_login(page, login, password, headful, log):
                 return {"ok": False, "error": "login-failed"}
             log(f"Opening contest {contest_id}…", "running")
             await page.goto(f"{POLYGON}/c/{contest_id}", wait_until="networkidle")
 
+            search_sel = "input[name='problemName'], input[placeholder*='problem' i], input#addProblemName"
+            if await page.locator(search_sel).count() == 0:
+                log(f"Couldn't find the add-problem search box on contest {contest_id}.", "error")
+                await _dump_controls(page, log)
+                return {"ok": False, "error": "control-not-found", "added": added, "failed": slugs}
+
             for i, slug in enumerate(slugs):
                 log(f"Adding {slug} ({i + 1}/{len(slugs)})…", "running")
                 try:
-                    search = page.locator("input[name='problemName'], input[placeholder*='problem' i], input#addProblemName")
+                    search = page.locator(search_sel)
                     await search.first.fill(slug)
                     await page.wait_for_timeout(600)  # let autocomplete populate
                     suggestion = page.get_by_text(slug, exact=True)
