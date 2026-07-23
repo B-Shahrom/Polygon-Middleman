@@ -11,4 +11,4 @@ call venv\Scripts\activate
 pip install -r requirements.txt --quiet
 
 echo Backend running at http://localhost:8000
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn main:app --host 127.0.0.1 --port 8000 --reload

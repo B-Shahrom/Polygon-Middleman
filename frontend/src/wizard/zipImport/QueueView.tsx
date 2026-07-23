@@ -48,22 +48,21 @@ export default function QueueView({ jobs, concurrency, setConcurrency, onRetryJo
         </div>
         <label className="flex items-center gap-1.5 text-xs text-gray-500">
           Parallel agents
-          <select
+          <input
+            type="number" min={1} max={24}
             value={concurrency}
-            onChange={(e) => setConcurrency(Number(e.target.value))}
-            className="bg-[#1a1714] border border-[#362f28] rounded px-2 py-1 text-xs text-gray-200 focus:outline-none focus:border-amber-500"
-          >
-            {[1, 2, 3, 4, 5, 6].map((n) => <option key={n} value={n}>{n}</option>)}
-          </select>
+            onChange={(e) => setConcurrency(Math.max(1, Math.min(24, Number(e.target.value) || 1)))}
+            className="bg-[#1a1714] border border-[#362f28] rounded px-2 py-1 text-xs text-gray-200 w-16 focus:outline-none focus:border-amber-500"
+          />
           <span
             className="text-gray-600"
             title={
               originCount > 1
-                ? `Requests are spread across ${originCount} backend origins (~${originCount * 6} concurrent connections), so agents don't contend for the browser's ~6-per-origin limit.`
-                : 'Origin sharding unavailable — no alternate loopback origin answered, so all requests share one ~6-connection pool.'
+                ? `Requests are spread across ${originCount} backend origins (~${originCount * 6} concurrent connections). Agents above that queue in the browser rather than speeding up.`
+                : `All requests share one origin (~6 concurrent connections). Agents above ~6 queue in the browser rather than speeding up. Origin sharding needs the backend bound to 0.0.0.0 (off by default for security).`
             }
           >
-            · {originCount} origin{originCount !== 1 ? 's' : ''}
+            · ~{originCount * 6} conn
           </span>
         </label>
       </div>

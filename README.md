@@ -194,7 +194,9 @@ Imports run through a **persistent queue** processed by a bounded worker pool �
 
 Lowering the agent count never cancels running jobs — the pool simply stops launching new ones and drains to the new limit. Raising it takes effect immediately.
 
-> **Origin sharding** — browsers cap ~6 concurrent HTTP/1.1 connections *per origin*, which would throttle parallel agents. Since the backend binds `0.0.0.0`, the same server answers on several distinct origins (`localhost`, `127.0.0.1`, `127.0.0.2`, …), each with its own connection pool. The client round-robins across them for ~6 → ~24 usable connections. Origins are probed at startup and silently dropped if unavailable (macOS only configures `127.0.0.1` by default), so it degrades gracefully. The queue view shows how many origins are active.
+> **Origin sharding** — browsers cap ~6 concurrent HTTP/1.1 connections *per origin*. The client can round-robin across several loopback origins (`localhost`, `127.0.0.1`, `127.0.0.2`, …) — each its own connection pool — for ~6 → ~24 usable connections. **This requires the backend to answer on those alternate addresses, which only happens when it's bound to `0.0.0.0`.** By default the backend binds **`127.0.0.1`** (loopback only) so it isn't reachable from your LAN, so sharding degrades to one origin (~6 connections). At ≤6 agents that's plenty; the queue view shows the active connection budget. To go wider safely, run several backend instances on different ports (all on `127.0.0.1`) rather than exposing `0.0.0.0`.
+
+> **Security** — the backend has no authentication, so it binds `127.0.0.1` (loopback only). Do **not** change it to `0.0.0.0` or expose the port publicly without adding an auth layer first — anyone who can reach it can operate your Polygon account. For remote access, use a private mesh VPN (Tailscale/WireGuard) rather than a public tunnel.
 
 ### Multi-Language Splitting
 

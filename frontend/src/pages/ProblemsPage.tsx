@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import {
   Plus, Search, RefreshCw, Star, Lock, Edit3, Eye,
   AlertCircle, Upload, ChevronLeft, ChevronRight, Archive,
-  CheckSquare, Square, GitCommit, Package, Wand2, X, Loader2,
+  CheckSquare, Square, GitCommit, Package, Wand2, X, Loader2, Download,
 } from 'lucide-react';
 import { api, ApiError } from '../api/client';
 import { useApp } from '../context/AppContext';
@@ -181,6 +181,18 @@ export default function ProblemsPage() {
   const bulkBuild = () => runBulk('build requested', (id) => api.problem.buildPackage(id, false, true).then(() => true));
   const bulkDerive = () => runBulk('derived', (id) => deriveDepsPointsFor(id));
 
+  // Download the latest READY package for each selected problem (skips problems
+  // with no built package). Spaces downloads out so the browser doesn't block them.
+  const bulkDownload = () => runBulk('download started', async (id) => {
+    const res = await api.problem.packages(id) as { result?: { id: number; state?: string; creationTimeSeconds?: number }[] };
+    const ready = (res.result || []).filter((p) => p.state === 'READY');
+    if (ready.length === 0) return false; // counts as "skipped"
+    const latest = ready.reduce((a, b) => (b.creationTimeSeconds ?? b.id) > (a.creationTimeSeconds ?? a.id) ? b : a);
+    api.problem.downloadPackage(id, latest.id);
+    await new Promise((r) => setTimeout(r, 400));
+    return true;
+  });
+
   const accessIcon = (access: string) => {
     if (access === 'OWNER') return <Star className="w-3.5 h-3.5 text-yellow-400" />;
     if (access === 'WRITE') return <Edit3 className="w-3.5 h-3.5 text-blue-400" />;
@@ -280,6 +292,9 @@ export default function ProblemsPage() {
             </Button>
             <Button variant="secondary" size="sm" icon={<Wand2 className="w-3.5 h-3.5" />} onClick={bulkDerive} disabled={bulkRunning}>
               Derive deps &amp; points
+            </Button>
+            <Button variant="secondary" size="sm" icon={<Download className="w-3.5 h-3.5" />} onClick={bulkDownload} disabled={bulkRunning}>
+              Download package
             </Button>
           </div>
           <button onClick={() => setSelected(new Set())} className="ml-auto flex items-center gap-1 text-xs text-gray-500 hover:text-gray-300">

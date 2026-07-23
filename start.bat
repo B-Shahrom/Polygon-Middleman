@@ -28,7 +28,7 @@ if not exist "node_modules" (
 
 :: Start backend (hidden window via powershell)
 echo   [start] Backend on http://localhost:8000
-powershell -Command "Start-Process cmd -ArgumentList '/c cd /d \"%ROOT%backend\" && call venv\Scripts\activate && uvicorn main:app --host 0.0.0.0 --port 8000 --reload' -WindowStyle Hidden"
+powershell -Command "Start-Process cmd -ArgumentList '/c cd /d \"%ROOT%backend\" && call venv\Scripts\activate && uvicorn main:app --host 127.0.0.1 --port 8000 --reload' -WindowStyle Hidden"
 
 :: Wait a moment for backend
 timeout /t 3 /nobreak >nul
