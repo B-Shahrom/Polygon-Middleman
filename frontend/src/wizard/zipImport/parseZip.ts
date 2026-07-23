@@ -5,6 +5,7 @@ import {
 } from '../../utils/statementParser';
 import { extractGroupFromFilename } from '../../utils/testParser';
 import { ParsedZip, ExtraSolution } from './types';
+import { baseProblemSlug } from './merge';
 
 /** Lowercased final path segment. */
 function baseName(p: string): string {
@@ -229,7 +230,8 @@ export async function parseZip(zip: JSZip): Promise<ParsedZip> {
     !checkerCode && !solutionCode && !validatorCode &&
     extraSolutions.length === 0 && tests.length > 0;
   if (testsOnly) {
-    warnings.push(`Tests-only archive (${tests.length} tests) — will append to the existing problem "${problemName}"`);
+    const target = baseProblemSlug(problemName);
+    warnings.push(`Tests-only archive (${tests.length} tests) — appends to problem "${target}"`);
   }
 
   return {

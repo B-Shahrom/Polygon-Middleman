@@ -15,7 +15,7 @@ import {
   DiffInfo, Phase, FALLBACK_SETTINGS,
 } from './zipImport/types';
 import { parseZip } from './zipImport/parseZip';
-import { mergeParsedGroup } from './zipImport/merge';
+import { mergeParsedGroup, baseProblemSlug } from './zipImport/merge';
 import { useImportQueue } from './zipImport/useImportQueue';
 import PreviewList from './zipImport/PreviewList';
 import QueueView from './zipImport/QueueView';
@@ -189,10 +189,14 @@ export default function ZipImport({ open, onClose }: Props) {
 
     const bySlug = new Map<string, ParsedItem[]>();
     for (const it of toImport) {
-      const slug = it.slug.trim() || it.parsed!.problemName;
-      const arr = bySlug.get(slug) || [];
+      const raw = it.slug.trim() || it.parsed!.problemName;
+      // A tests-only pack named "<slug>-tests" appends to the base problem
+      // "<slug>" — so it groups with the main archive (if selected together)
+      // and, on its own, targets the existing problem instead of a new one.
+      const key = it.parsed!.testsOnly ? baseProblemSlug(raw) : raw;
+      const arr = bySlug.get(key) || [];
       arr.push(it);
-      bySlug.set(slug, arr);
+      bySlug.set(key, arr);
     }
 
     const newJobs: ImportJob[] = Array.from(bySlug.entries()).map(([slug, groupItems]) => {
@@ -210,7 +214,9 @@ export default function ZipImport({ open, onClose }: Props) {
         checkerType: batch.enabled ? batch.checkerType : settings.checker_source_type,
         solutionType: batch.enabled ? batch.solutionType : settings.solution_source_type,
       };
-      const name = groupItems.length > 1 ? `${merged.displayName} (${groupItems.length} archives)` : merged.displayName;
+      const name = merged.testsOnly
+        ? `${slug} — append ${merged.tests.length} tests`
+        : groupItems.length > 1 ? `${merged.displayName} (${groupItems.length} archives)` : merged.displayName;
       return {
         id: `job-${++jobSeq}`, batchId, name, slug,
         parsed: merged, opts, status: 'queued' as const, log: [], errors: 0,

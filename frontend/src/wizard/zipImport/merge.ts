@@ -1,5 +1,13 @@
 import { ParsedZip } from './types';
 
+/** The problem a test pack belongs to: strip a trailing `-tests` / `-test`
+ *  (optionally numbered, e.g. `-tests-2`) so `edu-foo-tests` → `edu-foo`. A
+ *  tests-only archive named after the base problem plus `-tests` therefore
+ *  appends to that problem instead of spawning a separate `-tests` problem. */
+export function baseProblemSlug(slug: string): string {
+  return slug.replace(/[-_]tests?(?:[-_]?\d+)?$/i, '') || slug;
+}
+
 /** Pull the developer's global test index out of a testset filename.
  *  Prefers an explicit `idx<n>`; falls back to the first number; else keeps
  *  input order. Used to re-order tests that arrive split across archives. */

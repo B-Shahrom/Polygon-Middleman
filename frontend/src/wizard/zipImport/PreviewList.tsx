@@ -1,5 +1,6 @@
 import { CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
 import { ParsedItem, ParsedZip, BatchOverride, DiffInfo, OnExists, ON_EXISTS_LABEL } from './types';
+import { baseProblemSlug } from './merge';
 
 interface Props {
   items: ParsedItem[];
@@ -17,12 +18,17 @@ interface Props {
 const inputCls = 'bg-[#1a1714] border border-[#362f28] rounded px-2 py-1 text-xs text-gray-200 focus:outline-none focus:border-amber-500';
 
 export default function PreviewList({ items, updateItem, batch, setBatch, existingByName, diffs, loadDiff, hideDiff, okCount, badCount }: Props) {
-  // How many non-skipped archives share each slug — those merge into one problem.
+  // Grouping key matches handleQueue: tests-only packs key by their base slug so
+  // they merge with the main archive of the same problem.
+  const groupKey = (it: ParsedItem) => {
+    const raw = it.slug.trim() || it.parsed!.problemName;
+    return it.parsed!.testsOnly ? baseProblemSlug(raw) : raw;
+  };
+  // How many non-skipped archives share each key — those merge into one problem.
   const slugCount = new Map<string, number>();
   for (const it of items) {
     if (!it.parsed || it.skip) continue;
-    const s = it.slug.trim() || it.parsed.problemName;
-    slugCount.set(s, (slugCount.get(s) || 0) + 1);
+    slugCount.set(groupKey(it), (slugCount.get(groupKey(it)) || 0) + 1);
   }
 
   return (
@@ -82,9 +88,9 @@ export default function PreviewList({ items, updateItem, batch, setBatch, existi
                 {item.parsed?.testsOnly && (
                   <span className="text-[10px] font-medium uppercase tracking-wide px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-300 flex-shrink-0">tests only</span>
                 )}
-                {item.parsed && !item.skip && (slugCount.get(item.slug.trim() || item.parsed.problemName) || 1) > 1 && (
+                {item.parsed && !item.skip && (slugCount.get(groupKey(item)) || 1) > 1 && (
                   <span className="text-[10px] font-medium uppercase tracking-wide px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 flex-shrink-0">
-                    merges ×{slugCount.get(item.slug.trim() || item.parsed.problemName)}
+                    merges ×{slugCount.get(groupKey(item))}
                   </span>
                 )}
               </div>
@@ -158,7 +164,11 @@ export default function PreviewList({ items, updateItem, batch, setBatch, existi
                     <span className="text-gray-500">+{item.parsed.extraSolutions.length} sol ({item.parsed.extraSolutions.map(s => s.tag).join(',')})</span>
                   )}
                   {!item.parsed.hasScoring && !item.parsed.testsOnly && <span className="text-gray-600">no scoring → 100pts on last group</span>}
-                  {item.parsed.testsOnly && <span className="text-sky-300/80">appends tests · statement &amp; scoring untouched</span>}
+                  {item.parsed.testsOnly && (
+                    <span className="text-sky-300/80">
+                      appends to <span className="font-mono text-sky-200">{baseProblemSlug(item.slug.trim() || item.parsed.problemName)}</span> · statement &amp; scoring untouched
+                    </span>
+                  )}
                 </div>
 
                 {/* Slug conflict warning + change preview */}
