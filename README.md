@@ -150,6 +150,24 @@ Polygon_Middleman/
 **Checker/Validator**: checker, validator, interactor, setChecker, setValidator, setInteractor  
 **And more**: Script, Tags, Tutorial, Packages, Contest
 
+### Headless import API (for orchestrators)
+
+The full ZIP-import pipeline also runs **server-side**, so any client (a script, or the
+Maestro orchestrator — see [maestro_plan_from_polygon_middleman.md](maestro_plan_from_polygon_middleman.md))
+can import a problem without a browser:
+
+- `POST /api/import/problem` — multipart upload of one or more `.zip` files (fields:
+  `timeLimit`, `memoryLimit`, `onExists`, `checkerType`, `solutionType`). Parses each
+  archive, merges same-slug archives (main + `<slug>-tests` packs), and runs
+  create → statements → checker → solution → tests → groups → **commit → build+verify**
+  per problem. Returns a per-problem result + step log.
+- `GET /api/import/verify/{problemId}` — latest build-package state (`NONE`/`PENDING`/`RUNNING`/`READY`/`FAILED`).
+- `GET /api/import/package/{problemId}` — download the latest `READY` package (the built Polygon ZIP).
+
+The server-side pipeline (`backend/zip_parser.py`, `backend/statement_parser.py`,
+`backend/import_pipeline.py`) is a faithful port of the browser importer and produces
+identical Polygon problems.
+
 ## Key Features
 
 ### ZIP Import (Batch)

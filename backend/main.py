@@ -1,7 +1,7 @@
 import json
 import os
 import time as _time
-from typing import Optional
+from typing import Optional, List
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -691,6 +691,116 @@ async def problem_package(problemId: int, packageId: int, type: Optional[str] = 
     if type:
         params["type"] = type
     return await proxy("problem.package", params)
+
+
+# ── Headless import (API-driven — the whole pipeline server-side, for Maestro) ─
+# The full import pipeline is also implemented in the frontend (browser-driven);
+# these endpoints run the SAME pipeline server-side so any client (the Maestro
+# orchestrator, scripts) can import a problem from a ZIP without a browser.
+
+def _import_defaults() -> dict:
+    s = dict(DEFAULT_SETTINGS)
+    s.update(_config.get("default_settings", {}))
+    return s
+
+
+async def _packages(problemId: int) -> list:
+    api_key, api_secret = get_creds()
+    body, _ = await call_polygon("problem.packages", api_key, api_secret, {"problemId": problemId})
+    data = json.loads(body.decode("utf-8", errors="replace"))
+    if data.get("status") == "FAILED":
+        raise HTTPException(status_code=400, detail=data.get("comment", "problem.packages failed"))
+    return data.get("result") or []
+
+
+@app.post("/api/import/problem")
+async def import_problem(
+    files: List[UploadFile] = File(...),
+    timeLimit: Optional[int] = Form(None),
+    memoryLimit: Optional[int] = Form(None),
+    onExists: str = Form("fill"),
+    checkerType: Optional[str] = Form(None),
+    solutionType: Optional[str] = Form(None),
+):
+    """Parse one or more problem ZIPs and import each into Polygon end-to-end
+    (create → statements → checker → solution → tests → groups → commit →
+    build+verify). Archives that share a slug (a main archive + '<slug>-tests'
+    packs) are merged into one problem; a lone tests-only pack appends to the
+    base problem. Returns a per-problem result with its step log."""
+    import zip_parser as zp
+    from import_pipeline import run_import_pipeline
+
+    api_key, api_secret = get_creds()
+    settings = _import_defaults()
+    opts_common = {
+        "timeLimit": timeLimit if timeLimit is not None else settings["default_time_limit"],
+        "memoryLimit": memoryLimit if memoryLimit is not None else settings["default_memory_limit"],
+        "onExists": onExists if onExists in ("fill", "reset") else "fill",
+        "checkerType": checkerType or settings["checker_source_type"],
+        "solutionType": solutionType or settings["solution_source_type"],
+    }
+
+    parsed_items = []
+    parse_errors = []
+    for f in files:
+        content = await f.read()
+        try:
+            parsed_items.append(zp.parse_zip(content))
+        except Exception as e:
+            parse_errors.append({"file": f.filename, "error": str(e)})
+            alog.record("error", "import", f"parse failed: {f.filename} — {e}")
+
+    # Group by slug; tests-only packs key by base slug so they merge / append.
+    groups: dict = {}
+    for p in parsed_items:
+        key = zp.base_problem_slug(p["problemName"]) if p["testsOnly"] else p["problemName"]
+        groups.setdefault(key, []).append(p)
+
+    results = []
+    for slug, items in groups.items():
+        merged = zp.merge_parsed_group(items)
+        opts = {**opts_common, "slug": slug}
+        alog.record("api", "import", f"importing {slug} ({len(items)} archive(s), {len(merged['tests'])} tests)")
+        res = await run_import_pipeline(merged, opts, api_key, api_secret)
+        results.append(res)
+        alog.record("ok" if res["ok"] else "error", "import",
+                    f"{slug} → #{res.get('problemId')} · errors={res['errors']} · verify={res['verifyRequested']}")
+
+    return {"results": results, "parseErrors": parse_errors}
+
+
+@app.get("/api/import/verify/{problemId}")
+async def import_verify(problemId: int):
+    """Latest build-package state for a problem: NONE / PENDING / RUNNING / READY / FAILED."""
+    packages = await _packages(problemId)
+    if not packages:
+        return {"state": "NONE", "packageId": None, "revision": None, "comment": ""}
+    latest = max(packages, key=lambda p: (p.get("revision", 0), p.get("id", 0)))
+    return {
+        "state": latest.get("state"),
+        "packageId": latest.get("id"),
+        "revision": latest.get("revision"),
+        "type": latest.get("type"),
+        "comment": latest.get("comment", ""),
+    }
+
+
+@app.get("/api/import/package/{problemId}")
+async def import_package(problemId: int, type: Optional[str] = None):
+    """Download the latest READY package (the built Polygon ZIP) for a problem."""
+    api_key, api_secret = get_creds()
+    ready = [p for p in await _packages(problemId) if p.get("state") == "READY"]
+    if not ready:
+        raise HTTPException(status_code=404, detail="No READY package for this problem yet.")
+    latest = max(ready, key=lambda p: (p.get("revision", 0), p.get("id", 0)))
+    pkg_type = type or latest.get("type") or "standard"
+    pkg_body, _ = await call_polygon(
+        "problem.package", api_key, api_secret,
+        {"problemId": problemId, "packageId": latest["id"], "type": pkg_type},
+    )
+    filename = f"{problemId}-r{latest.get('revision')}-{pkg_type}.zip"
+    return Response(content=pkg_body, media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
 # ── Contest ───────────────────────────────────────────────────────────────────
