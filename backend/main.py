@@ -713,7 +713,7 @@ async def _packages(problemId: int) -> list:
     return data.get("result") or []
 
 
-@app.post("/api/import/problem")
+@app.post("/api/import-problem", status_code=202)
 async def import_problem(
     files: List[UploadFile] = File(...),
     timeLimit: Optional[int] = Form(None),
@@ -722,13 +722,19 @@ async def import_problem(
     checkerType: Optional[str] = Form(None),
     solutionType: Optional[str] = Form(None),
 ):
-    """Parse one or more problem ZIPs and import each into Polygon end-to-end
+    """ASYNC import. Parse one or more problem ZIPs, start the full pipeline
     (create → statements → checker → solution → tests → groups → commit →
-    build+verify). Archives that share a slug (a main archive + '<slug>-tests'
-    packs) are merged into one problem; a lone tests-only pack appends to the
-    base problem. Returns a per-problem result with its step log."""
+    build+verify) in the BACKGROUND, and return a `jobId` immediately — it never
+    blocks for the minutes an import can take. Poll `GET /api/verify-status/{jobId}`.
+
+    Same-slug archives (a main archive + '<slug>-tests' packs) merge into one
+    problem; a lone tests-only pack appends to the base. Every Polygon-side failure
+    is folded into the job's per-problem `errorCode`/`clientAction` — this endpoint
+    does NOT return a bare HTTP error for a Polygon failure. (Reminder: the raw
+    `/api/problem.*` proxy endpoints instead pass Polygon `FAILED` through as HTTP
+    200 with `status:"FAILED"` in the body — read the body there, not the code.)"""
     import zip_parser as zp
-    from import_pipeline import run_import_pipeline
+    import import_jobs
 
     api_key, api_secret = get_creds()
     settings = _import_defaults()
@@ -751,54 +757,68 @@ async def import_problem(
             alog.record("error", "import", f"parse failed: {f.filename} — {e}")
 
     # Group by slug; tests-only packs key by base slug so they merge / append.
-    groups: dict = {}
+    grouped: dict = {}
     for p in parsed_items:
         key = zp.base_problem_slug(p["problemName"]) if p["testsOnly"] else p["problemName"]
-        groups.setdefault(key, []).append(p)
+        grouped.setdefault(key, []).append(p)
+    groups = [(slug, zp.merge_parsed_group(items)) for slug, items in grouped.items()]
 
-    results = []
-    for slug, items in groups.items():
-        merged = zp.merge_parsed_group(items)
-        opts = {**opts_common, "slug": slug}
-        alog.record("api", "import", f"importing {slug} ({len(items)} archive(s), {len(merged['tests'])} tests)")
-        res = await run_import_pipeline(merged, opts, api_key, api_secret)
-        results.append(res)
-        alog.record("ok" if res["ok"] else "error", "import",
-                    f"{slug} → #{res.get('problemId')} · errors={res['errors']} · verify={res['verifyRequested']}")
-
-    return {"results": results, "parseErrors": parse_errors}
-
-
-@app.get("/api/import/verify/{problemId}")
-async def import_verify(problemId: int):
-    """Latest build-package state for a problem: NONE / PENDING / RUNNING / READY / FAILED."""
-    packages = await _packages(problemId)
-    if not packages:
-        return {"state": "NONE", "packageId": None, "revision": None, "comment": ""}
-    latest = max(packages, key=lambda p: (p.get("revision", 0), p.get("id", 0)))
+    job = import_jobs.create_job(groups, opts_common, parse_errors, api_key, api_secret)
+    alog.record("api", "import", f"job {job['jobId']} started · {len(groups)} problem(s), {len(parse_errors)} parse error(s)")
     return {
-        "state": latest.get("state"),
-        "packageId": latest.get("id"),
-        "revision": latest.get("revision"),
-        "type": latest.get("type"),
-        "comment": latest.get("comment", ""),
+        "jobId": job["jobId"],
+        "state": job["state"],
+        "problems": [{"slug": p["slug"], "name": p["name"], "testsOnly": p["testsOnly"],
+                      "testCount": p["testCount"], "importState": p["importState"]} for p in job["problems"]],
+        "parseErrors": parse_errors,
     }
 
 
-@app.get("/api/import/package/{problemId}")
-async def import_package(problemId: int, type: Optional[str] = None):
-    """Download the latest READY package (the built Polygon ZIP) for a problem."""
+@app.get("/api/verify-status/{jobId}")
+async def verify_status(jobId: str):
+    """Poll an import job. Returns per-problem import state + the LIVE build/verify
+    state, each with a machine-readable `errorCode` and `clientAction`
+    (proceed | success | retry | wait | halt). `alreadyVerified` /
+    `IMPORTED_ALREADY_VERIFIED` (clientAction `success`) means the revision already
+    had a verified package — usable now, NOT a failure."""
+    import import_jobs
     api_key, api_secret = get_creds()
-    ready = [p for p in await _packages(problemId) if p.get("state") == "READY"]
+    status = await import_jobs.verify_status(jobId, api_key, api_secret)
+    if status is None:
+        raise HTTPException(status_code=404, detail=f"Unknown jobId: {jobId}")
+    return status
+
+
+@app.get("/api/download-package/{jobId}")
+async def download_package(jobId: str, problemId: Optional[int] = None, type: Optional[str] = None):
+    """Download the latest READY package for a job's problem. If the job produced
+    more than one problem, pass `?problemId=` (it must belong to the job)."""
+    import import_jobs
+    api_key, api_secret = get_creds()
+    if import_jobs.get_job(jobId) is None:
+        raise HTTPException(status_code=404, detail=f"Unknown jobId: {jobId}")
+    ids = import_jobs.job_problem_ids(jobId)
+    if problemId is not None:
+        if problemId not in ids:
+            raise HTTPException(status_code=400, detail="problemId does not belong to this job.")
+        target = problemId
+    elif len(ids) == 1:
+        target = ids[0]
+    elif not ids:
+        raise HTTPException(status_code=404, detail="Job has no imported problem yet.")
+    else:
+        raise HTTPException(status_code=400, detail=f"Job produced {len(ids)} problems; pass ?problemId= (one of {ids}).")
+
+    ready = [p for p in await _packages(target) if p.get("state") == "READY"]
     if not ready:
         raise HTTPException(status_code=404, detail="No READY package for this problem yet.")
     latest = max(ready, key=lambda p: (p.get("revision", 0), p.get("id", 0)))
     pkg_type = type or latest.get("type") or "standard"
     pkg_body, _ = await call_polygon(
         "problem.package", api_key, api_secret,
-        {"problemId": problemId, "packageId": latest["id"], "type": pkg_type},
+        {"problemId": target, "packageId": latest["id"], "type": pkg_type},
     )
-    filename = f"{problemId}-r{latest.get('revision')}-{pkg_type}.zip"
+    filename = f"{target}-r{latest.get('revision')}-{pkg_type}.zip"
     return Response(content=pkg_body, media_type="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 

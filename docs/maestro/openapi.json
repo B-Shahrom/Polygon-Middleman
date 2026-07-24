@@ -1751,10 +1751,10 @@
         }
       }
     },
-    "/api/import/problem": {
+    "/api/import-problem": {
       "post": {
         "summary": "Import Problem",
-        "description": "Parse one or more problem ZIPs and import each into Polygon end-to-end\n(create → statements → checker → solution → tests → groups → commit →\nbuild+verify). Archives that share a slug (a main archive + '<slug>-tests'\npacks) are merged into one problem; a lone tests-only pack appends to the\nbase problem. Returns a per-problem result with its step log.",
+        "description": "ASYNC import. Parse one or more problem ZIPs, start the full pipeline\n(create → statements → checker → solution → tests → groups → commit →\nbuild+verify) in the BACKGROUND, and return a `jobId` immediately — it never\nblocks for the minutes an import can take. Poll `GET /api/verify-status/{jobId}`.\n\nSame-slug archives (a main archive + '<slug>-tests' packs) merge into one\nproblem; a lone tests-only pack appends to the base. Every Polygon-side failure\nis folded into the job's per-problem `errorCode`/`clientAction` — this endpoint\ndoes NOT return a bare HTTP error for a Polygon failure. (Reminder: the raw\n`/api/problem.*` proxy endpoints instead pass Polygon `FAILED` through as HTTP\n200 with `status:\"FAILED\"` in the body — read the body there, not the code.)",
         "operationId": "import_problem_api_import_problem_post",
         "requestBody": {
           "content": {
@@ -1767,7 +1767,7 @@
           "required": true
         },
         "responses": {
-          "200": {
+          "202": {
             "description": "Successful Response",
             "content": {
               "application/json": {
@@ -1788,19 +1788,19 @@
         }
       }
     },
-    "/api/import/verify/{problemId}": {
+    "/api/verify-status/{jobId}": {
       "get": {
-        "summary": "Import Verify",
-        "description": "Latest build-package state for a problem: NONE / PENDING / RUNNING / READY / FAILED.",
-        "operationId": "import_verify_api_import_verify__problemId__get",
+        "summary": "Verify Status",
+        "description": "Poll an import job. Returns per-problem import state + the LIVE build/verify\nstate, each with a machine-readable `errorCode` and `clientAction`\n(proceed | success | retry | wait | halt). `alreadyVerified` /\n`IMPORTED_ALREADY_VERIFIED` (clientAction `success`) means the revision already\nhad a verified package — usable now, NOT a failure.",
+        "operationId": "verify_status_api_verify_status__jobId__get",
         "parameters": [
           {
-            "name": "problemId",
+            "name": "jobId",
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
-              "title": "Problemid"
+              "type": "string",
+              "title": "Jobid"
             }
           }
         ],
@@ -1826,18 +1826,34 @@
         }
       }
     },
-    "/api/import/package/{problemId}": {
+    "/api/download-package/{jobId}": {
       "get": {
-        "summary": "Import Package",
-        "description": "Download the latest READY package (the built Polygon ZIP) for a problem.",
-        "operationId": "import_package_api_import_package__problemId__get",
+        "summary": "Download Package",
+        "description": "Download the latest READY package for a job's problem. If the job produced\nmore than one problem, pass `?problemId=` (it must belong to the job).",
+        "operationId": "download_package_api_download_package__jobId__get",
         "parameters": [
           {
-            "name": "problemId",
+            "name": "jobId",
             "in": "path",
             "required": true,
             "schema": {
-              "type": "integer",
+              "type": "string",
+              "title": "Jobid"
+            }
+          },
+          {
+            "name": "problemId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
               "title": "Problemid"
             }
           },

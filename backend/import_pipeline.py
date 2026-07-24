@@ -205,20 +205,31 @@ async def run_import_pipeline(parsed: Dict, opts: Dict, api_key: str, api_secret
         await step(f"Uploading {len(parsed['tests'])} tests...", do)
 
     verify_requested = False
+    already_verified = False
+    committed = False
 
     async def commit_and_verify():
-        nonlocal errors, verify_requested
+        nonlocal errors, verify_requested, already_verified, committed
         if errors == 0 and tests_complete:
             await step("Committing changes...", lambda: _commit(api, pid))
             if errors == 0:
+                committed = True
                 log.add("Requesting verification (build package)...", "running")
                 try:
                     await api.call("problem.buildPackage", {"problemId": pid, "full": False, "verify": True})
                     log.update_last("done", "Verification requested (building in background)")
                     verify_requested = True
                 except Exception as e:
-                    errors += 1
-                    log.update_last("error", f"Verification request failed — {e}")
+                    # Polygon refuses to rebuild a revision that already has a
+                    # non-failed verified package. That is NOT a failure — the
+                    # package exists and is usable. Treat it as success.
+                    if _is_already_verified(str(e)):
+                        log.update_last("done", "Already verified for this revision (package exists)")
+                        verify_requested = True
+                        already_verified = True
+                    else:
+                        errors += 1
+                        log.update_last("error", f"Verification request failed — {e}")
         else:
             log.add("Skipped commit & verify — an earlier step failed (fix and retry)", "error")
 
@@ -227,7 +238,8 @@ async def run_import_pipeline(parsed: Dict, opts: Dict, api_key: str, api_secret
         await step("Enabling groups and points...", lambda: _enable(api, pid))
         await upload_tests()
         await commit_and_verify()
-        return _result(False, errors, pid, verify_requested, log, parsed, opts)
+        return _result(False, errors, pid, verify_requested, log, parsed, opts,
+                       already_verified=already_verified, tests_complete=tests_complete, committed=committed)
 
     # 2. Info
     await step(
@@ -365,7 +377,8 @@ async def run_import_pipeline(parsed: Dict, opts: Dict, api_key: str, api_secret
 
     # 9 & 10. Commit + verify
     await commit_and_verify()
-    return _result(False, errors, pid, verify_requested, log, parsed, opts)
+    return _result(False, errors, pid, verify_requested, log, parsed, opts,
+                   already_verified=already_verified, tests_complete=tests_complete, committed=committed)
 
 
 async def _discard(api: _Api, pid: int):
@@ -384,8 +397,38 @@ async def _enable(api: _Api, pid: int):
     return "Groups & points enabled"
 
 
+# Polygon returns this FAILED when a rebuild is refused because the revision
+# already has a non-failed verified package — i.e. success, not failure.
+_ALREADY_VERIFIED_RE = re.compile(r"already .*package .*revision|already non-failed package", re.I)
+
+
+def _is_already_verified(msg: str) -> bool:
+    return bool(_ALREADY_VERIFIED_RE.search(msg or ""))
+
+
+# Per-problem import error codes and the client action each implies.
+#   proceed  — imported OK; poll verify-status next.
+#   success  — treat as done; the built package is usable now (fetch it).
+#   retry    — transient / idempotent; re-running the import is safe.
+#   halt     — broken input/config; stop and surface — retrying won't help.
+def _classify(pid, errors, verify_requested, already_verified, tests_complete, committed):
+    if pid is None:
+        return "CREATE_FAILED", "halt"
+    if already_verified:
+        return "IMPORTED_ALREADY_VERIFIED", "success"
+    if not tests_complete:
+        return "TESTS_INCOMPLETE", "retry"
+    if errors == 0:
+        return "IMPORTED", "proceed"
+    if committed and not verify_requested:
+        return "VERIFY_REQUEST_FAILED", "retry"
+    return "STEP_FAILED", "retry"
+
+
 def _result(failed: bool, errors: int, pid: Optional[int], verify_requested: bool,
-            log: Logger, parsed: Dict, opts: Dict) -> Dict:
+            log: Logger, parsed: Dict, opts: Dict, *,
+            already_verified: bool = False, tests_complete: bool = True, committed: bool = False) -> Dict:
+    code, action = _classify(pid, errors, verify_requested, already_verified, tests_complete, committed)
     return {
         "name": parsed.get("displayName") or opts["slug"],
         "slug": opts["slug"],
@@ -394,6 +437,9 @@ def _result(failed: bool, errors: int, pid: Optional[int], verify_requested: boo
         "failed": failed,
         "errors": errors,
         "verifyRequested": verify_requested,
+        "alreadyVerified": already_verified,
         "testsOnly": parsed.get("testsOnly", False),
+        "errorCode": code,
+        "clientAction": action,
         "log": log.entries,
     }

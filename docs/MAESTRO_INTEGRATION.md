@@ -4,10 +4,25 @@ Documentation only. Every claim is cited to `file:line` in this repo at the comm
 this doc. Where something does not exist it says **NOT IMPLEMENTED**; where it could not be
 verified it says **UNVERIFIED — <what to check>**. No credential values appear here.
 
-Scope note: an HTTP-driven import path **already exists** (`POST /api/import/problem` and
-friends, added before this doc). This manual documents **what is there today**, including its
-limits, rather than the Phase-2 target contract (`/api/import-problem`, job ids). Where the two
-differ, it is flagged.
+> **⚠️ PHASE 2 UPDATE (async import shipped).** The synchronous `/api/import/*` endpoints this
+> manual described in Phase 1 have been **replaced** by an async, job-based contract, verified
+> end-to-end against real Polygon. The Phase-1 §2/§4/§5/§8/§10 statements about "synchronous,
+> no job id, no per-error codes" are **superseded**. The current contract:
+>
+> - `POST /api/import-problem` (multipart ZIPs + opts) → **HTTP 202** `{jobId, state, problems[], parseErrors[]}` — returns immediately; the pipeline runs in the background.
+> - `GET /api/verify-status/{jobId}` → per-problem import state **and live build/verify state**, each with a machine-readable `errorCode` + `clientAction` (`proceed`/`success`/`retry`/`wait`/`halt`). Includes the `IMPORTED_ALREADY_VERIFIED` → `success` inversion.
+> - `GET /api/download-package/{jobId}` (`?problemId=` for a multi-problem job) → the latest READY package.
+>
+> Error/action model: **`docs/maestro/errors.md`** (rewritten for this model). Jobs are
+> in-memory (lost on restart). Same-slug imports are serialized across jobs
+> (`import_jobs.py` `_slug_lock`). Polygon `FAILED`-as-HTTP-200 still applies to the raw
+> `/api/problem.*` proxy endpoints (read the body `status`), but the async import folds every
+> Polygon failure into the job — never a bare HTTP error. The sections below retain the Phase-1
+> pipeline trace (§3), which is unchanged and now runs server-side via `import_pipeline.py`.
+
+Scope note: this manual's §2/§4/§5/§8/§10 were written against the earlier synchronous
+`/api/import/*` endpoints; read them together with the Phase 2 banner above, which is authoritative
+for the import surface.
 
 Line numbers are from: `backend/main.py`, `backend/import_pipeline.py`, `backend/zip_parser.py`,
 `backend/statement_parser.py`, `backend/activity_log.py`, `backend/polygon_api.py`,
