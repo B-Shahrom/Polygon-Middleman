@@ -1,15 +1,18 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { api } from '../../api/client';
-import { ImportJob, JobStatus, LogEntry } from './types';
-import { runImportPipeline, JobLogger, PipelineResult } from './pipeline';
+import { api, VerifyStatusResponse, VerifyProblem } from '../../api/client';
+import { ImportJob, JobStatus, VerifyStatus } from './types';
 
 /**
- * A persistent import queue processed by a bounded worker pool.
- *   - Up to `concurrency` jobs run at once (the "several agents").
- *   - Jobs with the SAME slug are serialized (Polygon edits one working copy
- *     per problem, so two flows on one problem would conflict).
- *   - You can enqueue more jobs at any time; workers pick them up.
- * `onSettled` fires once per job when it reaches a terminal state (for history).
+ * A persistent import queue. Each job uploads its archive(s) to the backend's
+ * async import endpoint (POST /api/import-problem) — the WHOLE pipeline runs
+ * server-side (one implementation, shared with the headless/Maestro path). The
+ * queue then polls GET /api/verify-status/{jobId} and mirrors the backend's
+ * per-problem state + step log into the UI.
+ *   - Up to `concurrency` jobs are submitted at once (the "several agents").
+ *   - Same-slug jobs are serialized here AND on the backend (one working copy
+ *     per problem).
+ *   - Enqueue more jobs any time; the pool picks them up. `onSettled` fires once
+ *     per job when its import reaches a terminal state (for history).
  */
 export function useImportQueue(concurrency: number, onSettled: (job: ImportJob) => void) {
   const [jobs, setJobs] = useState<ImportJob[]>([]);
@@ -21,41 +24,48 @@ export function useImportQueue(concurrency: number, onSettled: (job: ImportJob) 
   const patch = (id: string, p: Partial<ImportJob>) =>
     setJobs((prev) => prev.map((j) => (j.id === id ? { ...j, ...p } : j)));
 
-  const makeLogger = (id: string): JobLogger => ({
-    addLog: (text, status = 'pending', kind) =>
-      setJobs((prev) => prev.map((j) => (j.id === id ? { ...j, log: [...j.log, { text, status, kind }] } : j))),
-    updateLastLog: (status, text) =>
-      setJobs((prev) => prev.map((j) => {
-        if (j.id !== id) return j;
-        const log = [...j.log];
-        for (let i = log.length - 1; i >= 0; i--) {
-          if (log[i].kind !== 'header') { log[i] = { ...log[i], status, ...(text ? { text } : {}) }; break; }
-        }
-        return { ...j, log };
-      })),
-  });
+  // Map a backend problem record onto a frontend job. The import "slot" is freed
+  // as soon as the import finishes, even while the build/verify keeps running.
+  const applyBackendProblem = (jobId: string, slug: string, prob: VerifyProblem) => {
+    const importDone = prob.importState === 'imported' || prob.importState === 'failed';
+    const status: JobStatus = !importDone
+      ? 'running'
+      : prob.importState === 'failed' ? 'failed' : prob.errors > 0 ? 'warnings' : 'done';
+
+    let verifyStatus: VerifyStatus | undefined;
+    const v = prob.verify;
+    if (v?.state === 'READY') verifyStatus = 'passed';
+    else if (v?.state === 'FAILED') verifyStatus = 'failed';
+    else if (prob.verifyRequested) verifyStatus = 'verifying';
+
+    patch(jobId, {
+      status,
+      log: prob.log || [],
+      errors: prob.errors,
+      problemId: prob.problemId ?? undefined,
+      verifyStatus,
+      verifyComment: v?.comment,
+    });
+    if (importDone) runningSlugs.current.delete(slug.toLowerCase());
+  };
 
   const startJob = useCallback((job: ImportJob) => {
     runningSlugs.current.add(job.slug.toLowerCase());
-    patch(job.id, { status: 'running', log: [] });
+    patch(job.id, { status: 'running', log: [{ text: 'Submitting to backend…', status: 'running' }] });
     (async () => {
-      let res: PipelineResult;
       try {
-        res = await runImportPipeline(job.parsed, job.opts, makeLogger(job.id));
+        const res = await api.import.problem(job.files, job.opts);
+        if (res.parseErrors && res.parseErrors.length > 0) {
+          patch(job.id, { status: 'failed', log: [{ text: `Parse error: ${res.parseErrors[0].error}`, status: 'error' }] });
+          runningSlugs.current.delete(job.slug.toLowerCase());
+          return;
+        }
+        // The poller (keyed on backendJobId) takes over from here.
+        patch(job.id, { backendJobId: res.jobId });
       } catch (e) {
-        res = { failed: true, errors: 1 };
-        makeLogger(job.id).addLog(`Unexpected error: ${e instanceof Error ? e.message : 'Unknown'}`, 'error');
+        patch(job.id, { status: 'failed', log: [{ text: `Submit failed: ${e instanceof Error ? e.message : 'Unknown error'}`, status: 'error' }] });
+        runningSlugs.current.delete(job.slug.toLowerCase());
       }
-      const status: JobStatus = res.failed ? 'failed' : res.errors > 0 ? 'warnings' : 'done';
-      runningSlugs.current.delete(job.slug.toLowerCase());
-      // Freeing the slug + patching the job re-renders, which re-runs the pump
-      // effect with the CURRENT concurrency. Deliberately not calling pump()
-      // here: this closure would capture a stale pump (frozen at the initial
-      // concurrency) and could overshoot a lowered limit.
-      patch(job.id, {
-        status, problemId: res.problemId, errors: res.errors,
-        verifyStatus: res.verifyRequested ? 'verifying' : undefined,
-      });
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -73,10 +83,9 @@ export function useImportQueue(concurrency: number, onSettled: (job: ImportJob) 
     }
   }, [concurrency, startJob]);
 
-  // Drive the pool whenever the queue or the concurrency changes.
   useEffect(() => { pump(); }, [jobs, concurrency, pump]);
 
-  // Fire onSettled once per job when it reaches a terminal state.
+  // onSettled once per job when its import reaches a terminal state.
   useEffect(() => {
     for (const j of jobs) {
       const terminal = j.status === 'done' || j.status === 'warnings' || j.status === 'failed';
@@ -87,52 +96,54 @@ export function useImportQueue(concurrency: number, onSettled: (job: ImportJob) 
     }
   }, [jobs, onSettled]);
 
-  // Background verification poller for jobs whose build is still running. Keyed
-  // on the SET of verifying jobs (not the whole `jobs` array) so ongoing log
-  // churn from other running jobs doesn't keep resetting the interval.
-  const verifyingKey = jobs
-    .filter((j) => j.verifyStatus === 'verifying' && j.problemId)
-    .map((j) => `${j.id}:${j.problemId}`)
+  // Poll verify-status for every job that has a backend job and isn't fully
+  // settled (import still running, or build still verifying). Keyed on that set
+  // so log churn doesn't reset the interval.
+  const pollKey = jobs
+    .filter((j) => j.backendJobId && (j.status === 'running' || j.verifyStatus === 'verifying'))
+    .map((j) => `${j.id}:${j.backendJobId}:${j.slug}`)
     .join('|');
 
   useEffect(() => {
-    if (!verifyingKey) return;
-    const targets = verifyingKey.split('|').map((s) => {
-      const [id, pid] = s.split(':');
-      return { id, problemId: Number(pid) };
+    if (!pollKey) return;
+    const targets = pollKey.split('|').map((s) => {
+      const [id, bid, ...slugParts] = s.split(':');
+      return { id, bid, slug: slugParts.join(':') };
     });
     let cancelled = false;
-    interface Pkg { id: number; state?: string; comment?: string; creationTimeSeconds?: number }
     const poll = async () => {
       for (const t of targets) {
         if (cancelled) return;
         try {
-          const res = await api.problem.packages(t.problemId) as { result?: Pkg[] };
-          const pkgs = res.result || [];
-          if (pkgs.length === 0) continue;
-          const latest = pkgs.reduce((a, b) => (b.creationTimeSeconds ?? b.id) > (a.creationTimeSeconds ?? a.id) ? b : a);
-          if (latest.state === 'READY' || latest.state === 'FAILED') {
-            patch(t.id, { verifyStatus: latest.state === 'READY' ? 'passed' : 'failed', verifyComment: latest.comment });
-          }
-        } catch { /* transient */ }
+          const resp = await api.import.verifyStatus(t.bid) as VerifyStatusResponse;
+          const prob = resp.problems?.[0];
+          if (prob) applyBackendProblem(t.id, t.slug, prob);
+        } catch { /* transient — keep polling */ }
       }
     };
-    const iv = setInterval(poll, 4000);
+    poll();
+    const iv = setInterval(poll, 3000);
     return () => { cancelled = true; clearInterval(iv); };
-  }, [verifyingKey]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pollKey]);
 
   const enqueue = (newJobs: ImportJob[]) => setJobs((prev) => [...prev, ...newJobs]);
 
+  const resetJob = (j: ImportJob): ImportJob => ({
+    ...j, status: 'queued', log: [], errors: 0,
+    backendJobId: undefined, verifyStatus: undefined, verifyComment: undefined,
+  });
+
   const retryJob = (id: string) => {
     settled.current.delete(id);
-    setJobs((prev) => prev.map((j) => (j.id === id ? { ...j, status: 'queued', log: [], errors: 0, verifyStatus: undefined, verifyComment: undefined } : j)));
+    setJobs((prev) => prev.map((j) => (j.id === id ? resetJob(j) : j)));
   };
 
   const retryFailed = () => {
     setJobs((prev) => prev.map((j) => {
       if (j.status !== 'failed' && j.status !== 'warnings') return j;
       settled.current.delete(j.id);
-      return { ...j, status: 'queued', log: [], errors: 0, verifyStatus: undefined, verifyComment: undefined };
+      return resetJob(j);
     }));
   };
 

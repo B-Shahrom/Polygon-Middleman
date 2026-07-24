@@ -78,6 +78,7 @@ export interface BatchOverride {
 
 export interface ParsedItem {
   fileName: string;
+  file: File;            // the raw archive — re-sent to the backend on import
   parsed: ParsedZip | null;
   parseError?: string;
   skip: boolean;        // exclude this ZIP from the batch entirely
@@ -112,9 +113,10 @@ export interface ImportJob {
   batchId: string;
   name: string;   // display name
   slug: string;
-  parsed: ParsedZip;
+  files: File[];  // the archive(s) for this problem — uploaded to /api/import-problem
   opts: ImportOpts;
   status: JobStatus;
+  backendJobId?: string;  // the async backend job driving this import
   log: LogEntry[];
   problemId?: number;
   errors: number;

@@ -77,6 +77,43 @@ export interface AppSettings {
   default_memory_limit: number;
 }
 
+// ── Headless import job types (mirror backend import_jobs.py) ─────────────────
+export interface ImportRequestOpts {
+  timeLimit?: number;
+  memoryLimit?: number;
+  onExists?: 'fill' | 'reset';
+  checkerType?: string;
+  solutionType?: string;
+}
+export interface ImportJobResponse {
+  jobId: string;
+  state: string;
+  problems: { slug: string; name: string; testsOnly: boolean; testCount: number; importState: string }[];
+  parseErrors: { file: string; error: string }[];
+}
+export interface VerifyProblem {
+  slug: string;
+  name: string;
+  problemId: number | null;
+  importState: string;      // queued | running | imported | failed
+  errors: number;
+  verifyRequested: boolean;
+  alreadyVerified: boolean;
+  errorCode: string | null;
+  clientAction: string | null;
+  testsOnly: boolean;
+  testCount: number;
+  verify: { state: string; code: string; clientAction: string; comment: string; packageId: number | null; revision: number | null } | null;
+  log: { text: string; status: 'pending' | 'running' | 'done' | 'error'; kind?: 'header' }[];
+}
+export interface VerifyStatusResponse {
+  jobId: string;
+  state: string;            // running | done | failed
+  createdAt: number;
+  problems: VerifyProblem[];
+  parseErrors: { file: string; error: string }[];
+}
+
 export class ApiError extends Error {
   constructor(message: string, public status?: number) {
     super(message);
@@ -283,6 +320,24 @@ export const api = {
 
   contest: {
     problems: (contestId: string) => get('/api/contest.problems', { contestId }),
+  },
+
+  // Headless import: the whole pipeline runs on the backend (one implementation).
+  import: {
+    problem: (files: File[], opts?: ImportRequestOpts) => {
+      const fd = new FormData();
+      for (const f of files) fd.append('files', f);
+      if (opts?.timeLimit != null) fd.append('timeLimit', String(opts.timeLimit));
+      if (opts?.memoryLimit != null) fd.append('memoryLimit', String(opts.memoryLimit));
+      if (opts?.onExists) fd.append('onExists', opts.onExists);
+      if (opts?.checkerType) fd.append('checkerType', opts.checkerType);
+      if (opts?.solutionType) fd.append('solutionType', opts.solutionType);
+      return postForm('/api/import-problem', fd) as Promise<ImportJobResponse>;
+    },
+    verifyStatus: (jobId: string) => get(`/api/verify-status/${jobId}`) as Promise<VerifyStatusResponse>,
+    // Downloads via the stable primary origin (opens a browser download).
+    downloadPackageUrl: (jobId: string, problemId?: number) =>
+      `${PRIMARY}/api/download-package/${jobId}${problemId != null ? `?problemId=${problemId}` : ''}`,
   },
 
   automation: {

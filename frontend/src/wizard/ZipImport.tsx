@@ -133,12 +133,12 @@ export default function ZipImport({ open, onClose }: Props) {
         const zip = await JSZip.loadAsync(file);
         const result = await parseZip(zip);
         parsedItems.push({
-          fileName: file.name, parsed: result, skip: false, onExists: 'fill',
+          fileName: file.name, file, parsed: result, skip: false, onExists: 'fill',
           slug: result.problemName, timeLimit: settings.default_time_limit, memoryLimit: settings.default_memory_limit,
         });
       } catch (err) {
         parsedItems.push({
-          fileName: file.name, parsed: null,
+          fileName: file.name, file, parsed: null,
           parseError: err instanceof Error ? err.message : 'Failed to parse ZIP',
           skip: false, onExists: 'fill', slug: '', timeLimit: 1000, memoryLimit: 256,
         });
@@ -205,6 +205,8 @@ export default function ZipImport({ open, onClose }: Props) {
         const p = it.parsed!;
         return Object.keys(p.languages).length > 0 || p.checkerCode || p.solutionCode || p.validatorCode;
       }) || groupItems[0];
+      // Merge is used only for the preview/display here — the backend re-parses
+      // and merges the same archives authoritatively at import time.
       const merged = mergeParsedGroup(groupItems.map(it => it.parsed!));
       const opts: ImportOpts = {
         slug,
@@ -219,7 +221,7 @@ export default function ZipImport({ open, onClose }: Props) {
         : groupItems.length > 1 ? `${merged.displayName} (${groupItems.length} archives)` : merged.displayName;
       return {
         id: `job-${++jobSeq}`, batchId, name, slug,
-        parsed: merged, opts, status: 'queued' as const, log: [], errors: 0,
+        files: groupItems.map(it => it.file), opts, status: 'queued' as const, log: [], errors: 0,
       };
     });
 
