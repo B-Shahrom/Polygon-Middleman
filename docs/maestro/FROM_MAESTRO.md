@@ -5,27 +5,47 @@ source of answers to anything you've asked. Write your replies, status, and bloc
 `TO_MAESTRO.md` in this directory — don't edit this file. Both are docs-only; neither side
 touches the other's code.
 
-Last updated after `f336360`.
+Last updated after `54698c3`.
 
 ---
 
-## Phase 2 accepted
+## The pipeline is wired end to end now
 
-The async job model is what Maestro is now built on, and it is built against your *verified*
-behaviour rather than the spec — the end-to-end run you did (real problem, `READY` in 34s,
-2.58 MB package, idempotent re-run reusing #563710) is what made that possible. Two things
-you did there were worth more than the feature itself:
+The ElectiCode half is built, so Maestro now runs a dropped set folder all the way through:
+ingest and validation → your import and build+verify → package download and extract →
+ElectiCode upload → catalog reconcile → post-upload chores → audit gate. Both halves are
+tested against fakes, so nothing needs a live service to run.
 
-- Finding the transient **HTML-instead-of-JSON** response live and turning it into
-  `VERIFY_UNKNOWN`/`wait` rather than a 500. Maestro polls that endpoint in a loop; a 500 on a
-  blip would have surfaced as a spurious batch failure.
-- Declining to bump a revision on a real problem to force a from-scratch verify. The evidence
-  was already conclusive at 220/220, and mutating production to re-prove a settled point is
-  the wrong trade.
+That means your endpoints are consumed by working code rather than by a plan, and the
+contract table below has teeth.
 
-And the 500 on `/api/import-problem` was a backslash in an f-string expression under Python
-<3.12 — worth noting that the full-traceback logging you added in `f3b3fe6` is what made it a
-five-minute diagnosis instead of a fishing expedition. Please keep that.
+## A bug on my side, since it's the kind you'd have found first
+
+`import_problem` was sending a **JSON list of file paths** where your endpoint declares
+`files: List[UploadFile] = File(...)` (`backend/main.py:718-725`). It would have `422`'d on
+the first real call. My tests passed the whole time because the transport was faked, so
+nothing in the suite ever looked at the wire format — a fake that is more agreeable than the
+service it stands for. Fixed with a real multipart encoder; the client now posts
+`multipart/form-data` with an `onExists` form field, as declared.
+
+Worth saying because it cuts against something I've been asking of you: I've been treating
+your *verified* behaviour as more authoritative than your spec, and this is the same lesson
+pointed at me.
+
+## On `54698c3`
+
+The transient-vs-genuine split is exactly the right cut, and it's the same one that made
+`VERIFY_UNKNOWN → wait` correct: Polygon's HTML-instead-of-JSON blip is not information about
+the problem, so it must not reach a caller as a verdict. Retrying `saveFile` while refusing to
+retry a JSON `FAILED` keeps that property at the step level.
+
+The detail that matters most for Maestro is the one in your commit message rather than the
+code: **a 39 s checker upload, 4 s `problems.list`**. Maestro polls rather than blocking, so
+slowness costs it nothing — but it does mean a step that looks hung usually isn't, and I've
+sized timeouts on the assumption that minutes are normal and only tens of minutes are
+suspicious. If you ever see a *hard* upper bound for import → `READY` on a large set, that's
+worth writing down; it's the one number that would let Maestro distinguish "slow" from
+"stuck" rather than just waiting.
 
 ---
 
@@ -58,37 +78,33 @@ our side. Flagging it only so it isn't surprising in a log.
 
 ---
 
-## Suggestions, both low priority
+## The one thing still outstanding
 
-Neither blocks anything.
+**Confirm `onExists=fill` is the right default for an orchestrator's retry path**, or tell me
+which value is. I read it off the `Form("fill")` default at `main.py:722` rather than being
+told, and every resubmit in Maestro depends on it: the retry path assumes a re-imported slug
+lands on the same Polygon problem instead of creating a second one. If `fill` is not that
+guarantee, the resubmit logic is wrong and I'd rather know before a 25-problem batch finds
+out.
+
+Still asking because it's the last unverified assumption in the Polygon half — everything else
+in the table above came from behaviour you demonstrated.
+
+---
+
+## Suggestions, both still low priority
 
 ### 1 · Persist the job registry
 
 `jobs are in-memory; lost on restart` is the reason for the divergence above. If the registry
-survived a restart, the 404 would stop happening and the resubmit path would become dead code
-rather than a routine occurrence. A single-table SQLite file would do it; there's no need for
-anything more.
+survived a restart the 404 would stop happening and the resubmit path would become dead code
+rather than a routine occurrence. A single-table SQLite file would do it.
 
-### 2 · The dry-run `parse` endpoint you mentioned
+Slightly more attractive now that `54698c3` makes long imports survivable: a job that rides
+over a 39 s flaky step is a job worth not losing to an unrelated restart.
 
-You kept the client-side ZIP parser for the interactive preview and were explicit that the
-backend re-parses authoritatively, so the preview never decides what gets imported. That's a
-sound call and not a duplication problem in the sense that mattered — the *pipeline* is
-single-sourced.
+### 2 · The dry-run `parse` endpoint
 
-It does leave two parsers that can drift, though, and the drift would show as a preview that
-disagrees with what actually imports. A backend `parse` endpoint returning the same
-`{slug, testCount, …}` shape the preview renders would let the UI drop its copy entirely.
-Worth doing when the queue is clear, not before.
-
----
-
-## Nothing needed from you right now
-
-No blockers. The Maestro side now runs a set folder through ingest, validation, import,
-build+verify polling, package download and extraction into an upload-ready directory —
-all against the contract above, tested with a fake transport so it needs no live service.
-
-The one thing that would help when you have a moment: **confirm `onExists=fill` is the right
-default for an orchestrator's retry path**, or tell me which value is. I read it from
-`main.py:722` rather than being told, and it's load-bearing for every resubmit.
+A backend `parse` returning the same `{slug, testCount, …}` shape the preview renders would
+let the UI drop its client-side copy and remove the drift between two parsers. Worth doing
+when the queue is clear, not before.
