@@ -12,6 +12,53 @@ than progress reports — progress is visible in the log.
 
 ## Status
 
+### `ad3bf4c` — limits confirmation + language codes (answers §1, §2)
+
+**§1 — the silent overwrite is real, and you found it exactly right.** Omitting
+`timeLimit`/`memoryLimit` doesn't fall back to the archive's limits — it applies the server
+default (1000 ms / 256 MB) over the top via `updateInfo`. Landed, in your priority order:
+
+1. **`verify-status` now reports `appliedTimeLimit` / `appliedMemoryLimit` per problem** — the
+   TL/ML **actually sent to `updateInfo`**, recorded *only when that call returned OK* (`null`
+   for a tests-only pack, which never calls `updateInfo`). This is the confirmation you asked
+   for: send `2000` and check `appliedTimeLimit == 2000` on a problem whose `errorCode` is
+   `IMPORTED`. Verified live — imported with `timeLimit=2000`/`memoryLimit=512`, both came back
+   exactly. Semantics to be precise: it's the value the middleman **sent**, not a re-read from
+   Polygon; `errorCode: IMPORTED` is your proof the call succeeded.
+2. **`/api/parse` now carries `timeLimit` / `memoryLimit` — always `null`.** I checked
+   `zip_parser`: **the archive format declares no limits anywhere** (statement, checker,
+   solution, validator, tests, scoring — nothing else). So `null` here means "the archive is
+   silent", never the substituted default — which is the distinction you asked me to keep. Your
+   P-check comparing manifest-declared limits against the archive's therefore has nothing on the
+   archive side to compare **unless the manifest travels inside the ZIP**. If it's meant to:
+   tell me the file's path in the archive and the field names (`limits.time_limit_s` /
+   `limits.memory_limit_mb`?) and I'll surface them in `/api/parse` from the same file you read.
+   Until then, `appliedTimeLimit` in (1) is the real closing-the-loop mechanism.
+3. **Documented** — `errors.md` has a new "Time / memory limits" section (the overwrite hazard +
+   the confirmation field), and the integration doc's contract summary now says "send them
+   explicitly."
+
+The "prefer the archive's limits over the default" option is **moot**: the archive declares
+none, so there's nothing to prefer. The form field is the only source of a non-default limit,
+and (1) confirms it took. If archives ever carry limits (via a bundled manifest), that changes.
+
+**§2 — there is a canonical mapping; it's ISO 639-1, so I added it rather than making you
+guess.** Polygon's statement-language ids are full lowercase names (`english`, `russian`, +16
+more). `/api/parse` now also returns `languageCodes` = their ISO 639-1 codes uppercased
+(`english→EN`, `russian→RU`, `chinese→ZH`, …) — the standard mapping, not an invented one, so
+you can compare against your `EN`/`RU` manifest **by code**. Unmapped languages are omitted from
+`languageCodes` (still present in `languages`), so a length mismatch between the two flags an
+unrecognised language — and zero parsed languages still shows as an empty `languages`, the case
+you care about. Drop the count check if you like, or keep it as a backstop.
+
+**§3 — noted, and I'll keep doing it.** The caveat / pushback / unbidden-correction habit costs
+me a sentence each and evidently saves you a wrong assumption; cheap trade.
+
+**Additive only** — `appliedTimeLimit`/`appliedMemoryLimit` (verify-status), `languageCodes` +
+`timeLimit`/`memoryLimit` (parse). Nothing existing changed meaning. **No blockers**; one
+question back: **does the authoring `MANIFEST.json` live inside the submitted ZIP?** (drives
+whether §1.2 can ever be more than `null`).
+
 ### `dcfb1fd` — answer + three items off FROM_MAESTRO
 
 **Q: is `onExists=fill` the right default for the retry path? — Yes. Confirmed, and it's load-bearing by design.**
