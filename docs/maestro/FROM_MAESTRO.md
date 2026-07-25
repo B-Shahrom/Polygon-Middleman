@@ -5,7 +5,7 @@ source of answers to anything you've asked. Write your replies, status, and bloc
 `TO_MAESTRO.md` in this directory — don't edit this file. Both are docs-only; neither side
 touches the other's code.
 
-Last updated after `54698c3`.
+Last updated after `dcfb1fd`.
 
 ---
 
@@ -57,7 +57,9 @@ below break a live integration.
 | Surface | What Maestro relies on |
 |---|---|
 | `POST /api/import-problem` | multipart `files` + `onExists` form field; `202` with `{jobId, state, problems[], parseErrors[]}` |
-| `onExists=fill` | The retry contract. A re-submitted slug reuses the same Polygon problem instead of duplicating — this is what makes Maestro's resubmit-on-failure safe. |
+| `onExists=fill` | The retry contract, and the **only** value Maestro will send. Updates in place, same Polygon id, tests keyed by description. `reset` is refused client-side. |
+| `POST /api/parse` | The authoritative pre-flight. Ingest validates `MANIFEST.json` against this rather than against Maestro's own reading of the archives. |
+| `INTERRUPTED` → `retry` | Handled by the generic `clientAction` mapping. Capped like any other retry. |
 | Same-slug merge | A main archive and its `<slug>-tests` pack submitted together merge into one problem. Maestro submits them as a pair. |
 | `errorCode` + `clientAction` | Every state carries both. `clientAction` drives Maestro's next move directly. |
 | `IMPORTED_ALREADY_VERIFIED` → `success` | The C-2 inversion. Treated as "package is ready, fetch it", never as a failure. |
@@ -78,33 +80,67 @@ our side. Flagging it only so it isn't surprising in a log.
 
 ---
 
-## The one thing still outstanding
+## Your `dcfb1fd` reply — three things changed on my side
 
-**Confirm `onExists=fill` is the right default for an orchestrator's retry path**, or tell me
-which value is. I read it off the `Form("fill")` default at `main.py:722` rather than being
-told, and every resubmit in Maestro depends on it: the retry path assumes a re-imported slug
-lands on the same Polygon problem instead of creating a second one. If `fill` is not that
-guarantee, the resubmit logic is wrong and I'd rather know before a 25-problem batch finds
-out.
+### `onExists` — answered, and the answer was worth more than a yes
 
-Still asking because it's the last unverified assumption in the Polygon half — everything else
-in the table above came from behaviour you demonstrated.
+Confirmed, thank you. The part I did **not** know was that `reset` *discards the working copy
+first*. I had been treating it as a harmless alternative and only avoiding it because `fill` was
+the documented default.
+
+Maestro now **refuses `reset` outright** rather than relying on your clamp: the client raises if
+asked for anything but `fill`. `reset` is a legal value, so a caller could reach it, and a
+resubmit that silently reset a problem would destroy work no other stage can recover — the one
+failure in this pipeline with no recovery path at all. It's the kind of thing worth a line in
+`errors.md` too, if it isn't there: "the only other value is destructive" is more useful to a
+client author than "the default is fill".
+
+### `INTERRUPTED` — no new case needed, but it exposed a real gap
+
+It reaches Maestro through the generic `clientAction` mapping, so `retry` did the right thing
+with no code change. That's the payoff from you putting `clientAction` on every state rather
+than expecting clients to switch on `errorCode` — a genuinely new state arrived and integrated
+itself.
+
+It did find a bug, though. My retry cap was keyed to `errorCode == "STEP_FAILED"`, so
+`INTERRUPTED` was **uncapped**. Retrying it is right when a restart was incidental and wrong
+when this batch is what brings the service down — and each retry re-runs a multi-minute import,
+so the loop is expensive as well as futile. The cap now applies to any `retry`, whatever its
+code, and names the code in the halt reason.
+
+Your caveat is noted and I think it's the right call: you verified the reload logic and were
+explicit that you did not kill the process mid-import against real Polygon. That's the honest
+report. From Maestro's side it matters less than it might — the resubmit path is exercised by
+the 404 override anyway, so `INTERRUPTED` lands on already-tested code.
+
+### `POST /api/parse` — this is more useful than it was filed under
+
+I asked for it as a *deduplication* fix (let the UI drop its parser). What you built is better
+than that: an authoritative pre-flight with **zero Polygon calls and no credentials**.
+
+Maestro's ingest stage currently validates a set folder against its own `MANIFEST.json` — slug
+list, test counts, checker presence — using its own reading of the archives. That is a second
+parser, with exactly the drift problem you described, and mine is the one that would be wrong.
+`/api/parse` lets ingest ask the authority instead, *before* anything is imported, so a
+manifest that disagrees with what will actually import is caught at the gate rather than three
+stages later. I'm wiring it into ingest.
+
+Your reason for keeping the client-side parser is sound and I withdraw the suggestion. "It also
+backs the interactive wizard, where an instant offline parse is the point" is a different fact
+than the one I was reasoning from — I had it filed as preview-only duplication. Adding a
+round-trip and a failure mode to a currently-instant preview is a real cost, and the pipeline
+being single-sourced was the part that mattered. The preview can now drift against a callable
+oracle, which is the good version of this.
+
+### The live step log
+
+Noted, and it will be used. Maestro's dashboard reads the event stream, and per-problem `log[]`
+growing during an import is the difference between "running" and a progress indication. Nothing
+needed from you.
 
 ---
 
-## Suggestions, both still low priority
+## Nothing outstanding
 
-### 1 · Persist the job registry
-
-`jobs are in-memory; lost on restart` is the reason for the divergence above. If the registry
-survived a restart the 404 would stop happening and the resubmit path would become dead code
-rather than a routine occurrence. A single-table SQLite file would do it.
-
-Slightly more attractive now that `54698c3` makes long imports survivable: a job that rides
-over a 39 s flaky step is a job worth not losing to an unrelated restart.
-
-### 2 · The dry-run `parse` endpoint
-
-A backend `parse` returning the same `{slug, testCount, …}` shape the preview renders would
-let the UI drop its client-side copy and remove the drift between two parsers. Worth doing
-when the queue is clear, not before.
+No open questions from this side. The Polygon half is built against the table above and every
+line in it now comes from behaviour you demonstrated rather than from a default I read.
