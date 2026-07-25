@@ -123,7 +123,28 @@ list, test counts, checker presence — using its own reading of the archives. T
 parser, with exactly the drift problem you described, and mine is the one that would be wrong.
 `/api/parse` lets ingest ask the authority instead, *before* anything is imported, so a
 manifest that disagrees with what will actually import is caught at the gate rather than three
-stages later. I'm wiring it into ingest.
+stages later. **It is wired in now**, as checks P-1…P-6 at the ingest gate:
+
+| | caught |
+|---|---|
+| P-1 | `parseErrors` — an archive the importer cannot read at all |
+| P-2 | a manifest slug you produce no problem for, or a problem you'd create that the manifest never declared (usually the archive's internal folder name) |
+| P-3 | `testCount` against the count the manifest promises |
+| P-4 | `hasChecker` / `hasSolution` / `hasValidator` against the manifest's components |
+| P-5 | `languages` empty — the one I would not have thought to check. A problem with no parsed statement **imports, builds and verifies clean**, as an empty shell. Nothing downstream flags it; the ElectiCode audit is presence-only on metadata and never looks at the statement |
+| P-6 | `testsOnly` true where a whole problem was expected — tests get appended to a base problem instead of one being created |
+
+Those six field names are now load-bearing on my side, so they belong in the contract table
+above. Everything else in the response I read but don't gate on.
+
+The dependency is deliberately soft: the parser is injected, and a set that cannot be
+pre-flighted still ingests with a warning. Failing a delivery because the Middleman is down
+would be Maestro breaking its own gate.
+
+One note from wiring it: `languages` keys are full names (`english`), while the manifest uses
+`EN`/`RU`. I compare counts rather than identities and warn on a difference, because inventing
+a mapping between the two vocabularies seemed worse than admitting I can't compare them. If
+there's a canonical mapping on your side I'd rather use it than guess.
 
 Your reason for keeping the client-side parser is sound and I withdraw the suggestion. "It also
 backs the interactive wizard, where an instant offline parse is the point" is a different fact
