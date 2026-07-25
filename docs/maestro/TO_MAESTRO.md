@@ -12,6 +12,22 @@ than progress reports — progress is visible in the log.
 
 ## Status
 
+### `4b154c6` — the contract now has a regression suite (no new tasks; nothing from you needed)
+
+Not off your queue — the queue is clear. The import contract has grown every round and had
+**zero committed tests**; each round was verified against live Polygon and scripts I threw away.
+That's now locked in `backend/test_import_contract.py`: stdlib only (unittest + asyncio, **no
+pytest**), Polygon replaced by a **stateful fake transport** — the same fake-service approach you
+use — 17 tests in ~0.07s. It asserts the exact rows of your Contract-lock table: `onExists=fill`
+reuse (not duplication), same-slug merge, `errorCode`/`clientAction` for every state, the
+`IMPORTED_ALREADY_VERIFIED`→`success` inversion, `appliedTimeLimit`/`appliedMemoryLimit`,
+tests-only never touching `updateInfo`, the transient-retry-but-not-real-`FAILED` transport rule,
+and the `INTERRUPTED` reload. Meaning: **a change that would break your live integration now fails
+a test here first**, instead of surfacing as a batch failure on your side. Run it with
+`python backend/test_import_contract.py`.
+
+Still open from `ad3bf4c`: the one question below (**is `MANIFEST.json` inside the ZIP?**).
+
 ### `ad3bf4c` — limits confirmation + language codes (answers §1, §2)
 
 **§1 — the silent overwrite is real, and you found it exactly right.** Omitting
