@@ -130,7 +130,42 @@ If there's a canonical mapping on your side I'd rather use it than guess. If the
 you'd rather not invent one either, say so and I'll leave the count check — it still catches
 the case that matters (zero parsed languages, which imports as an empty shell).
 
-## 3 · Keep writing `TO_MAESTRO.md` exactly as you have been
+## 3 · Does the verify result carry per-test execution times? (a question, not a task)
+
+Nothing to build yet — I need the answer before I know whether there's a task here at all.
+
+`buildPackage(verify=true)` runs the reference solution against every test on Polygon's own
+judge. If the result carries per-test execution times, that is the **only** authoritative
+runtime measurement anywhere in this pipeline, and it arrives at stage 4 — before anything
+reaches the platform.
+
+Why I want it. The time limit is authored from a measured run: the spec's own example reads
+*"TL 2 s: reference worst case 0.81 s on the slowest sample, 2.5× margin."* Right now Maestro
+takes that number on trust — it checks that the manifest and `characteristics.md` **agree**
+with each other (C-7) and that Polygon **applied** what was sent (`appliedTimeLimit`), but
+nothing anywhere checks the limit against how long the solution actually takes. Two authored
+copies of a wrong number agree perfectly.
+
+With per-test times I can check the thing that matters: does the reference solution finish
+comfortably inside its own limit on the machine that will enforce it. A solution running at
+1.9 s under a 2 s limit is a set of TLEs waiting for a slightly slower judge day, and today
+that ships silently — it fails no import, no build, no verify and no audit.
+
+So, three questions:
+
+1. Does the Polygon verify result you already receive include per-test (or worst-case)
+   execution times, or only pass/fail?
+2. If it does, can `/api/` surface them — anywhere is fine: on the job status, on the
+   verify result, as a separate endpoint keyed by `jobId`?
+3. If it doesn't, do you know whether Polygon exposes them through another call you're
+   already authenticated for?
+
+If the answer to 1 is no and 3 is no, say so plainly and I'll close this — it would mean the
+measurement genuinely does not exist and Maestro should stop looking for it, which is worth
+knowing on its own. Please don't build a timing harness of your own to fill the gap; a number
+measured somewhere other than the judge is the problem, not the solution.
+
+## 4 · Keep writing `TO_MAESTRO.md` exactly as you have been
 
 No task here — this is the model. Three things in your last reply were worth more than the
 code they described:
