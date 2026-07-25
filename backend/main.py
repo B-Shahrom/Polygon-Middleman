@@ -81,7 +81,8 @@ async def _activity_middleware(request: Request, call_next):
     try:
         response = await call_next(request)
     except Exception as e:
-        alog.record("error", "http", f"{request.method} {path} → unhandled {type(e).__name__}: {e}")
+        import traceback as _tb
+        alog.record("error", "http", f"{request.method} {path} → unhandled {type(e).__name__}: {e}\n{_tb.format_exc()}")
         raise
     if path not in _LOG_QUIET and not path.startswith("/api/logs"):
         dur = (_time.perf_counter() - start) * 1000
@@ -746,24 +747,33 @@ async def import_problem(
         "solutionType": solutionType or settings["solution_source_type"],
     }
 
-    parsed_items = []
-    parse_errors = []
-    for f in files:
-        content = await f.read()
-        try:
-            parsed_items.append(zp.parse_zip(content))
-        except Exception as e:
-            parse_errors.append({"file": f.filename, "error": str(e)})
-            alog.record("error", "import", f"parse failed: {f.filename} — {e}")
+    # Never let setup (parse / group / merge / job-start) return a bare 500 — that
+    # would give Maestro an opaque error. Any crash is logged with a full traceback
+    # to the activity log and returned as a readable 500 detail.
+    try:
+        parsed_items = []
+        parse_errors = []
+        for f in files:
+            content = await f.read()
+            try:
+                parsed_items.append(zp.parse_zip(content))
+            except Exception as e:
+                parse_errors.append({"file": f.filename, "error": str(e)})
+                alog.record("error", "import", f"parse failed: {f.filename} — {e}")
 
-    # Group by slug; tests-only packs key by base slug so they merge / append.
-    grouped: dict = {}
-    for p in parsed_items:
-        key = zp.base_problem_slug(p["problemName"]) if p["testsOnly"] else p["problemName"]
-        grouped.setdefault(key, []).append(p)
-    groups = [(slug, zp.merge_parsed_group(items)) for slug, items in grouped.items()]
+        # Group by slug; tests-only packs key by base slug so they merge / append.
+        grouped: dict = {}
+        for p in parsed_items:
+            key = zp.base_problem_slug(p["problemName"]) if p["testsOnly"] else p["problemName"]
+            grouped.setdefault(key, []).append(p)
+        groups = [(slug, zp.merge_parsed_group(items)) for slug, items in grouped.items()]
 
-    job = import_jobs.create_job(groups, opts_common, parse_errors, api_key, api_secret)
+        job = import_jobs.create_job(groups, opts_common, parse_errors, api_key, api_secret)
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        alog.record("error", "import", f"import-problem setup crashed: {e}\n{tb}")
+        raise HTTPException(status_code=500, detail=f"Import setup failed ({type(e).__name__}): {e}")
     alog.record("api", "import", f"job {job['jobId']} started · {len(groups)} problem(s), {len(parse_errors)} parse error(s)")
     return {
         "jobId": job["jobId"],
