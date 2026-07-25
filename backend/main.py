@@ -735,8 +735,15 @@ async def parse_archives(files: List[UploadFile] = File(...)):
     resulting problem plus any per-file parseErrors. Lets an orchestrator (or the
     UI) validate a folder and preview what WILL import from the single source of
     truth (the backend parser), instead of a separate client-side guess. No
-    credentials required."""
+    credentials required.
+
+    Note on limits: the problem-archive format carries NO time/memory limits, so
+    `timeLimit`/`memoryLimit` are reported as `null` — the archive declares nothing,
+    and the import applies the caller's form field or the server default (see the
+    import endpoint). They are NOT filled with the default here, on purpose: `null`
+    means 'archive is silent', which is the signal a pre-flight limit-check needs."""
     import zip_parser as zp
+    from statement_parser import iso_639_1
 
     try:
         parsed_items = []
@@ -759,12 +766,18 @@ async def parse_archives(files: List[UploadFile] = File(...)):
         for slug, items in grouped.items():
             m = zp.merge_parsed_group(items)
             groups = sorted({t["group"] for t in m["tests"]}, key=lambda g: int(g)) if m["tests"] else []
+            lang_names = list(m["languages"].keys())
             problems.append({
                 "slug": slug,
                 "name": m.get("displayName") or slug,
                 "testsOnly": m.get("testsOnly", False),
                 "testCount": len(m["tests"]),
-                "languages": list(m["languages"].keys()),
+                "languages": lang_names,
+                # Canonical ISO 639-1 codes (EN/RU/...) for the parsed languages, so a
+                # consumer whose manifest uses codes can compare directly. Unmapped
+                # languages are omitted here (present in `languages`), so a length
+                # mismatch between the two flags an unrecognised language.
+                "languageCodes": [c for c in (iso_639_1(n) for n in lang_names) if c],
                 "hasChecker": bool(m["checkerCode"]),
                 "hasValidator": bool(m["validatorCode"]),
                 "hasSolution": bool(m["solutionCode"]),
@@ -772,6 +785,9 @@ async def parse_archives(files: List[UploadFile] = File(...)):
                 "hasScoring": m["hasScoring"],
                 "groups": groups,
                 "archiveCount": len(items),
+                # The archive format declares no limits; null = 'archive is silent'.
+                "timeLimit": None,
+                "memoryLimit": None,
             })
     except Exception as e:
         import traceback

@@ -19,6 +19,23 @@ LANG_NAME_MAP: Dict[str, str] = {
     "ukrainian": "ukrainian", "vietnamese": "vietnamese",
 }
 
+# Polygon's statement-language identifiers are these full lowercase names. Their
+# canonical ISO 639-1 codes (uppercased) — this is the standard mapping, not an
+# invented one, so a consumer using EN/RU/... can compare against parsed languages
+# directly instead of only by count.
+ISO_639_1: Dict[str, str] = {
+    "english": "EN", "russian": "RU", "tajik": "TG", "uzbek": "UZ",
+    "arabic": "AR", "chinese": "ZH", "french": "FR", "georgian": "KA",
+    "hungarian": "HU", "japanese": "JA", "korean": "KO", "persian": "FA",
+    "polish": "PL", "portuguese": "PT", "spanish": "ES", "turkish": "TR",
+    "ukrainian": "UK", "vietnamese": "VI",
+}
+
+
+def iso_639_1(language: str) -> Optional[str]:
+    """ISO 639-1 code for a Polygon statement language, or None if unmapped."""
+    return ISO_639_1.get((language or "").lower())
+
 
 def _empty_sections() -> Dict[str, str]:
     return {k: "" for k in SECTION_KEYS}

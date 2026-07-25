@@ -77,6 +77,7 @@ _VERIFY_ACTION = {
 _PUBLIC_FIELDS = (
     "slug", "name", "problemId", "importState", "errors", "verifyRequested",
     "alreadyVerified", "errorCode", "clientAction", "testsOnly", "testCount",
+    "appliedTimeLimit", "appliedMemoryLimit",
 )
 
 
@@ -116,6 +117,8 @@ def create_job(groups: List[Tuple[str, dict]], opts_common: dict, parse_errors: 
         "alreadyVerified": False,
         "errorCode": None,
         "clientAction": None,
+        "appliedTimeLimit": None,
+        "appliedMemoryLimit": None,
         "log": [],
     } for slug, merged in groups]
 
@@ -155,6 +158,8 @@ async def _run_job(job: dict, groups, opts_common: dict, api_key: str, api_secre
                 alreadyVerified=res.get("alreadyVerified", False),
                 errorCode=res.get("errorCode"),
                 clientAction=res.get("clientAction"),
+                appliedTimeLimit=res.get("appliedTimeLimit"),
+                appliedMemoryLimit=res.get("appliedMemoryLimit"),
                 importState="imported" if (res.get("ok") or res.get("alreadyVerified")) else "failed",
             )
             _persist(job)  # checkpoint each problem's terminal state (survives restart)

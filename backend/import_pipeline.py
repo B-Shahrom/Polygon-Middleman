@@ -138,6 +138,11 @@ async def run_import_pipeline(parsed: Dict, opts: Dict, api_key: str, api_secret
     errors = 0
     slug = opts["slug"]
     tests_only = parsed.get("testsOnly", False)
+    # The TL/ML actually applied to the problem via updateInfo — recorded only when
+    # that call succeeds, so verify-status can CONFIRM what landed (a caller sends a
+    # limit and can check it took, instead of sending and hoping). Stays None for a
+    # tests-only pack, which never touches updateInfo.
+    applied_limits: Dict[str, Optional[int]] = {"timeLimit": None, "memoryLimit": None}
 
     async def step(label: str, fn):
         nonlocal errors
@@ -268,12 +273,19 @@ async def run_import_pipeline(parsed: Dict, opts: Dict, api_key: str, api_secret
                        already_verified=already_verified, tests_complete=tests_complete, committed=committed)
 
     # 2. Info
-    await step(
-        f"Setting problem info (TL={opts['timeLimit']}ms, ML={opts['memoryLimit']}MB)...",
-        lambda: api.call("problem.updateInfo", {
+    async def set_info():
+        await api.call("problem.updateInfo", {
             "problemId": pid, "inputFile": "stdin", "outputFile": "stdout",
             "interactive": False, "timeLimit": opts["timeLimit"], "memoryLimit": opts["memoryLimit"],
-        }),
+        })
+        # Record only after the call returns OK — appliedTimeLimit/appliedMemoryLimit
+        # in verify-status then mean "this landed", not "this was attempted".
+        applied_limits["timeLimit"] = opts["timeLimit"]
+        applied_limits["memoryLimit"] = opts["memoryLimit"]
+        return f"Setting problem info (TL={opts['timeLimit']}ms, ML={opts['memoryLimit']}MB)"
+    await step(
+        f"Setting problem info (TL={opts['timeLimit']}ms, ML={opts['memoryLimit']}MB)...",
+        set_info,
     )
 
     # 3. Statements (+ per-language tutorial)
@@ -404,7 +416,8 @@ async def run_import_pipeline(parsed: Dict, opts: Dict, api_key: str, api_secret
     # 9 & 10. Commit + verify
     await commit_and_verify()
     return _result(False, errors, pid, verify_requested, log, parsed, opts,
-                   already_verified=already_verified, tests_complete=tests_complete, committed=committed)
+                   already_verified=already_verified, tests_complete=tests_complete, committed=committed,
+                   applied_limits=applied_limits)
 
 
 async def _discard(api: _Api, pid: int):
@@ -453,8 +466,10 @@ def _classify(pid, errors, verify_requested, already_verified, tests_complete, c
 
 def _result(failed: bool, errors: int, pid: Optional[int], verify_requested: bool,
             log: Logger, parsed: Dict, opts: Dict, *,
-            already_verified: bool = False, tests_complete: bool = True, committed: bool = False) -> Dict:
+            already_verified: bool = False, tests_complete: bool = True, committed: bool = False,
+            applied_limits: Optional[Dict[str, Optional[int]]] = None) -> Dict:
     code, action = _classify(pid, errors, verify_requested, already_verified, tests_complete, committed)
+    applied_limits = applied_limits or {"timeLimit": None, "memoryLimit": None}
     return {
         "name": parsed.get("displayName") or opts["slug"],
         "slug": opts["slug"],
@@ -467,5 +482,9 @@ def _result(failed: bool, errors: int, pid: Optional[int], verify_requested: boo
         "testsOnly": parsed.get("testsOnly", False),
         "errorCode": code,
         "clientAction": action,
+        # The TL/ML actually applied via updateInfo (None if not applied — e.g. a
+        # tests-only pack, or the info step failed). Lets the caller confirm limits.
+        "appliedTimeLimit": applied_limits["timeLimit"],
+        "appliedMemoryLimit": applied_limits["memoryLimit"],
         "log": log.entries,
     }

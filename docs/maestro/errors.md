@@ -66,3 +66,23 @@ Fetched **live** from Polygon on each `GET /api/verify-status/{jobId}` (`import_
 - **`success` is a first-class action, distinct from `proceed`.** `IMPORTED_ALREADY_VERIFIED`
   and `VERIFY_READY` both mean "done, package usable" — do **not** treat either as a failure
   or halt.
+
+## Time / memory limits — a silent overwrite, and how to confirm
+
+- **Omitting `timeLimit`/`memoryLimit` on `import-problem` applies the SERVER DEFAULT** (`main.py`:
+  `timeLimit if timeLimit is not None else settings["default_time_limit"]`), and the import
+  **sets** it on Polygon via `problem.updateInfo`. So a caller that leaves the field off does
+  **not** get "the archive's limits" — it gets the configured default, written over the top
+  (defaults: 1000 ms / 256 MB, `DEFAULT_SETTINGS`). **Always send both explicitly** if the
+  problem's limits matter — a wrong limit doesn't fail a build, it silently TLEs correct
+  solutions later.
+- **The archive format carries no limits.** `zip_parser` extracts statement, checker, solution,
+  validator, tests and scoring — there is nowhere in the ZIP that declares TL/ML. `/api/parse`
+  therefore reports `timeLimit: null` / `memoryLimit: null` (**null = archive is silent**, never
+  the default). The form field on `import-problem` is the only source of a non-default limit.
+- **Confirm what landed:** `verify-status.problems[].appliedTimeLimit` / `appliedMemoryLimit`
+  report the TL/ML **actually sent to `updateInfo`, recorded only when that call succeeded**
+  (`null` if the info step failed, or for a tests-only pack, which never calls `updateInfo`).
+  Send `2000` and check `appliedTimeLimit == 2000` on a problem whose `errorCode` is `IMPORTED`
+  — that closes the loop instead of sending-and-hoping. (It's the value the middleman sent, not
+  a re-read from Polygon; with `errorCode: IMPORTED` the `updateInfo` call returned OK.)
