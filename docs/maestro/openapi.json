@@ -1751,6 +1751,43 @@
         }
       }
     },
+    "/api/parse": {
+      "post": {
+        "summary": "Parse Archives",
+        "description": "DRY RUN. Parse + group one or more problem ZIP(s) exactly the way\n/api/import-problem would, but import nothing and touch Polygon not at all —\nreturns the authoritative {slug, name, testsOnly, testCount, …} for each\nresulting problem plus any per-file parseErrors. Lets an orchestrator (or the\nUI) validate a folder and preview what WILL import from the single source of\ntruth (the backend parser), instead of a separate client-side guess. No\ncredentials required.",
+        "operationId": "parse_archives_api_parse_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_parse_archives_api_parse_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/import-problem": {
       "post": {
         "summary": "Import Problem",
@@ -2052,6 +2089,23 @@
           "files"
         ],
         "title": "Body_import_problem_api_import_problem_post"
+      },
+      "Body_parse_archives_api_parse_post": {
+        "properties": {
+          "files": {
+            "items": {
+              "type": "string",
+              "contentMediaType": "application/octet-stream"
+            },
+            "type": "array",
+            "title": "Files"
+          }
+        },
+        "type": "object",
+        "required": [
+          "files"
+        ],
+        "title": "Body_parse_archives_api_parse_post"
       },
       "Body_problem_save_file_api_problem_saveFile_post": {
         "properties": {

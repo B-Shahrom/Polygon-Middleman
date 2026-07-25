@@ -38,14 +38,19 @@ export function useImportQueue(concurrency: number, onSettled: (job: ImportJob) 
     else if (v?.state === 'FAILED') verifyStatus = 'failed';
     else if (prob.verifyRequested) verifyStatus = 'verifying';
 
-    patch(jobId, {
+    const p: Partial<ImportJob> = {
       status,
-      log: prob.log || [],
       errors: prob.errors,
       problemId: prob.problemId ?? undefined,
       verifyStatus,
       verifyComment: v?.comment,
-    });
+    };
+    // Only overwrite the log once the backend has real steps. Until the pipeline
+    // logs its first step (e.g. while it waits on a same-slug lock), prob.log is
+    // empty — keep showing "Submitting to backend…" rather than flashing back to
+    // "Waiting to start…" for the whole upload.
+    if (prob.log && prob.log.length) p.log = prob.log;
+    patch(jobId, p);
     if (importDone) runningSlugs.current.delete(slug.toLowerCase());
   };
 

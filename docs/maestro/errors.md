@@ -22,8 +22,9 @@ Polygon `FAILED` through as HTTP **200** with `status:"FAILED"` in the body —
 | `IMPORTED_ALREADY_VERIFIED` | Committed, but the revision already had a non-failed verified package. **This is the `FAILED`-that-means-success from the C-2 finding — the package is `READY` and usable, NOT a failure.** (`import_pipeline.py` `_is_already_verified`, `_classify`.) | **`success`** — fetch the package. |
 | `TESTS_INCOMPLETE` | Tests still missing after 4 fill rounds; **not committed** (`pipeline` gate). | `retry` — re-POST; the fill/append logic completes the gaps (idempotent). |
 | `VERIFY_REQUEST_FAILED` | Committed, but the `buildPackage` trigger failed (a non-already-verified error). | `retry`. |
-| `STEP_FAILED` | A pipeline step errored — commit **skipped**. Covers a **transient Polygon HTML/non-JSON response** (observed live on `setChecker`) *and* a genuine content error (e.g. a non-compiling `solution.cpp` — Polygon rejects it at `saveSolution`). | `retry`, but **cap retries** — a content error won't recover; read `log[]` for the reason. |
+| `STEP_FAILED` | A pipeline step errored **after in-pipeline retries** — commit **skipped**. Transient Polygon HTML/non-JSON responses are now retried inside the pipeline (3× with backoff, `import_pipeline.py` `_Api.call`), so a single blip no longer reaches here; this code means either a *persistent* transient failure or a genuine content error (e.g. a non-compiling `solution.cpp` — Polygon rejects it at `saveSolution`). | `retry`, but **cap retries** — a content error won't recover; read `log[]` for the reason. |
 | `CREATE_FAILED` | Couldn't create or resolve the problem. | `halt`. |
+| `INTERRUPTED` | The backend restarted while this problem was still importing. The pipeline's background task can't be resumed, so the reloaded job marks the in-flight problem failed (`import_jobs.py` `load_persisted`). Completed problems in the same job keep their real state. | `retry` — re-POST; `onExists=fill` makes it idempotent. |
 
 ## Build/verify codes — `verify-status.problems[].verify.{state,code,clientAction}`
 
@@ -44,7 +45,7 @@ Fetched **live** from Polygon on each `GET /api/verify-status/{jobId}` (`import_
 | Condition | Surface | `clientAction` |
 |---|---|---|
 | Credentials not configured | `401` `{"detail":"API credentials not configured..."}` (`get_creds`, `main.py:154-156`) on `import-problem`/`verify-status`/`download-package`. | `halt` — `POST /credentials`, then retry. |
-| Unknown `jobId` | `404` `{"detail":"Unknown jobId: ..."}` on `verify-status`/`download-package`. | `halt` (jobs are in-memory; lost on restart). |
+| Unknown `jobId` | `404` `{"detail":"Unknown jobId: ..."}` on `verify-status`/`download-package`. | `halt` for a **genuinely** unknown id. Jobs now **persist across restart** (SQLite, `job_store.py`; reloaded on startup), so a restart no longer 404s a known job — one that was mid-flight returns with `INTERRUPTED`/`retry` instead. Your resubmit-on-404 override stays valid as a belt-and-braces fallback; it just fires far less often now. |
 | `download-package`, no READY package yet | `404` `{"detail":"No READY package for this problem yet."}`. | `wait` — poll `verify-status` until `VERIFY_READY`, then download. |
 | `download-package`, multi-problem job w/o `problemId` | `400` `{"detail":"Job produced N problems; pass ?problemId= ..."}`. | `halt` (fix the request — pass `?problemId=`). |
 | `download-package`, `problemId` not in job | `400` `{"detail":"problemId does not belong to this job."}`. | `halt`. |

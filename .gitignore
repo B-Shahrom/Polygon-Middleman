@@ -29,6 +29,9 @@ env/
 # Backend config (credentials)
 backend/config.json
 
+# Import job registry (persisted across restarts; runtime state, not source)
+backend/jobs.sqlite3
+
 # Playwright persistent browser profile (holds Codeforces session cookies)
 backend/.pw-profile/
 

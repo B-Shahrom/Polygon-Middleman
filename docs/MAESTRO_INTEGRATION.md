@@ -9,12 +9,15 @@ verified it says **UNVERIFIED — <what to check>**. No credential values appear
 > end-to-end against real Polygon. The Phase-1 §2/§4/§5/§8/§10 statements about "synchronous,
 > no job id, no per-error codes" are **superseded**. The current contract:
 >
+> - `POST /api/parse` (multipart ZIPs) → **HTTP 200** `{problems[], parseErrors[]}` — a **dry run**: parse + group exactly as the import would, but import nothing and touch Polygon not at all. Each problem carries `{slug, name, testsOnly, testCount, languages, hasChecker, hasValidator, hasSolution, extraSolutionCount, hasScoring, groups, archiveCount}`. No credentials required. Use it to validate a folder before committing to an import.
 > - `POST /api/import-problem` (multipart ZIPs + opts) → **HTTP 202** `{jobId, state, problems[], parseErrors[]}` — returns immediately; the pipeline runs in the background.
-> - `GET /api/verify-status/{jobId}` → per-problem import state **and live build/verify state**, each with a machine-readable `errorCode` + `clientAction` (`proceed`/`success`/`retry`/`wait`/`halt`). Includes the `IMPORTED_ALREADY_VERIFIED` → `success` inversion.
+> - `GET /api/verify-status/{jobId}` → per-problem import state **and live build/verify state**, each with a machine-readable `errorCode` + `clientAction` (`proceed`/`success`/`retry`/`wait`/`halt`). Includes the `IMPORTED_ALREADY_VERIFIED` → `success` inversion. The per-problem `log[]` **streams live** as the pipeline runs (not only at the end).
 > - `GET /api/download-package/{jobId}` (`?problemId=` for a multi-problem job) → the latest READY package.
 >
 > Error/action model: **`docs/maestro/errors.md`** (rewritten for this model). Jobs are
-> in-memory (lost on restart). Same-slug imports are serialized across jobs
+> held in memory **and checkpointed to SQLite** (`job_store.py`), so verify-status /
+> download-package survive a backend restart; a job that was mid-import at restart returns
+> `INTERRUPTED`/`retry` rather than 404. Same-slug imports are serialized across jobs
 > (`import_jobs.py` `_slug_lock`). Polygon `FAILED`-as-HTTP-200 still applies to the raw
 > `/api/problem.*` proxy endpoints (read the body `status`), but the async import folds every
 > Polygon failure into the job — never a bare HTTP error. The sections below retain the Phase-1

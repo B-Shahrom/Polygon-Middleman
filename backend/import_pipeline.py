@@ -19,8 +19,12 @@ import activity_log as alog
 
 
 class Logger:
-    def __init__(self):
-        self.entries: List[Dict] = []
+    def __init__(self, sink: Optional[List[Dict]] = None):
+        # If a sink list is provided, append/mutate IT directly so a caller
+        # holding the same reference (the job's problem record) sees each step
+        # as it happens — that's what makes verify-status stream a live log
+        # instead of staying empty until the whole pipeline returns.
+        self.entries: List[Dict] = sink if sink is not None else []
 
     def add(self, text: str, status: str = "running"):
         self.entries.append({"text": text, "status": status})
@@ -127,9 +131,10 @@ async def _find_missing_tests(api: _Api, pid: int, expected: List[Dict]) -> List
         return []
 
 
-async def run_import_pipeline(parsed: Dict, opts: Dict, api_key: str, api_secret: str) -> Dict:
+async def run_import_pipeline(parsed: Dict, opts: Dict, api_key: str, api_secret: str,
+                              log_sink: Optional[List[Dict]] = None) -> Dict:
     api = _Api(api_key, api_secret)
-    log = Logger()
+    log = Logger(log_sink)
     errors = 0
     slug = opts["slug"]
     tests_only = parsed.get("testsOnly", False)

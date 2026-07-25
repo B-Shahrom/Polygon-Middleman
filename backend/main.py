@@ -15,6 +15,19 @@ alog.install_logging()
 alog.record("server", "server", "Backend started")
 
 
+@app.on_event("startup")
+async def _restore_jobs():
+    """Reload persisted import jobs so verify-status / download-package survive a
+    restart (jobs mid-flight when we died are marked INTERRUPTED → resubmit)."""
+    try:
+        import import_jobs
+        n = import_jobs.load_persisted()
+        if n:
+            alog.record("server", "server", f"Restored {n} import job(s) from disk")
+    except Exception as e:
+        alog.record("error", "server", f"Job restore failed: {e}")
+
+
 # ── Pretty Logging ────────────────────────────────────────────────────────────
 
 def _log_request(method: str, params: dict, files: dict | None = None):
@@ -712,6 +725,60 @@ async def _packages(problemId: int) -> list:
     if data.get("status") == "FAILED":
         raise HTTPException(status_code=400, detail=data.get("comment", "problem.packages failed"))
     return data.get("result") or []
+
+
+@app.post("/api/parse")
+async def parse_archives(files: List[UploadFile] = File(...)):
+    """DRY RUN. Parse + group one or more problem ZIP(s) exactly the way
+    /api/import-problem would, but import nothing and touch Polygon not at all —
+    returns the authoritative {slug, name, testsOnly, testCount, …} for each
+    resulting problem plus any per-file parseErrors. Lets an orchestrator (or the
+    UI) validate a folder and preview what WILL import from the single source of
+    truth (the backend parser), instead of a separate client-side guess. No
+    credentials required."""
+    import zip_parser as zp
+
+    try:
+        parsed_items = []
+        parse_errors = []
+        for f in files:
+            content = await f.read()
+            try:
+                parsed_items.append(zp.parse_zip(content))
+            except Exception as e:
+                parse_errors.append({"file": f.filename, "error": str(e)})
+
+        # Same grouping as the import: tests-only packs key by base slug so they
+        # merge with / append to their base problem.
+        grouped: dict = {}
+        for p in parsed_items:
+            key = zp.base_problem_slug(p["problemName"]) if p["testsOnly"] else p["problemName"]
+            grouped.setdefault(key, []).append(p)
+
+        problems = []
+        for slug, items in grouped.items():
+            m = zp.merge_parsed_group(items)
+            groups = sorted({t["group"] for t in m["tests"]}, key=lambda g: int(g)) if m["tests"] else []
+            problems.append({
+                "slug": slug,
+                "name": m.get("displayName") or slug,
+                "testsOnly": m.get("testsOnly", False),
+                "testCount": len(m["tests"]),
+                "languages": list(m["languages"].keys()),
+                "hasChecker": bool(m["checkerCode"]),
+                "hasValidator": bool(m["validatorCode"]),
+                "hasSolution": bool(m["solutionCode"]),
+                "extraSolutionCount": len(m["extraSolutions"]),
+                "hasScoring": m["hasScoring"],
+                "groups": groups,
+                "archiveCount": len(items),
+            })
+    except Exception as e:
+        import traceback
+        alog.record("error", "import", f"parse dry-run crashed: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Parse failed ({type(e).__name__}): {e}")
+    alog.record("api", "import", f"parse dry-run · {len(problems)} problem(s), {len(parse_errors)} parse error(s)")
+    return {"problems": problems, "parseErrors": parse_errors}
 
 
 @app.post("/api/import-problem", status_code=202)

@@ -9,7 +9,10 @@ a machine-readable error code and a client action (proceed / success / retry /
 wait / halt) so the orchestrator decides retry-vs-halt from the response, not from
 log text.
 
-State is in-memory (like the activity log); jobs are lost on restart.
+Job records are held in memory but also checkpointed to a small SQLite store
+(`job_store.py`) so verify-status / download-package survive a backend restart;
+the background pipeline task itself can't be resumed, so a job that was mid-flight
+at restart is reloaded as INTERRUPTED (clientAction=retry).
 """
 from __future__ import annotations
 
@@ -21,9 +24,42 @@ from typing import Dict, List, Optional, Tuple
 
 from polygon_api import call_polygon
 from import_pipeline import run_import_pipeline
+import job_store
 
 _JOBS: Dict[str, dict] = {}
 _SLUG_LOCKS: Dict[str, asyncio.Lock] = {}
+
+
+def _persist(job: dict) -> None:
+    """Checkpoint a job to the durable store (best-effort; never raises)."""
+    job_store.save(job)
+
+
+def load_persisted() -> int:
+    """Load persisted jobs into memory on startup. Any job still mid-flight when
+    the process last died can't have its pipeline task resumed, so mark those
+    problems INTERRUPTED (clientAction=retry) — the client resubmits, and
+    `onExists=fill` makes that idempotent. Returns the count loaded."""
+    loaded = 0
+    for job in job_store.load_all():
+        interrupted = False
+        for prob in job.get("problems", []):
+            if prob.get("importState") in ("queued", "running"):
+                prob["importState"] = "failed"
+                prob["errorCode"] = "INTERRUPTED"
+                prob["clientAction"] = "retry"
+                prob.setdefault("log", []).append(
+                    {"text": "Backend restarted mid-import — resubmit to finish (fill is idempotent)",
+                     "status": "error"})
+                interrupted = True
+        if interrupted:
+            job["state"] = "failed"
+        elif job.get("state") == "running":
+            # No mid-flight problems but never marked done → settle it.
+            job["state"] = "done"
+        _JOBS[job["jobId"]] = job
+        loaded += 1
+    return loaded
 
 # Build/verify state → (code, client action). `success` = usable now; `wait` =
 # still building, poll again; `halt` = the problem is broken (see comment).
@@ -91,6 +127,7 @@ def create_job(groups: List[Tuple[str, dict]], opts_common: dict, parse_errors: 
         "parseErrors": parse_errors,
     }
     _JOBS[job_id] = job
+    _persist(job)
     asyncio.create_task(_run_job(job, groups, opts_common, api_key, api_secret))
     return job
 
@@ -101,10 +138,15 @@ async def _run_job(job: dict, groups, opts_common: dict, api_key: str, api_secre
         async with _slug_lock(slug):  # serialize same-slug across all jobs
             opts = {**opts_common, "slug": slug}
             try:
-                res = await run_import_pipeline(merged, opts, api_key, api_secret)
+                # Pass the problem's own log list as the sink so steps stream into
+                # the job record live (verify-status reads it), not only at the end.
+                res = await run_import_pipeline(merged, opts, api_key, api_secret,
+                                                log_sink=prob["log"])
             except Exception as e:  # pragma: no cover — pipeline is defensive, but never crash the job
+                prob["log"].append({"text": f"Import crashed: {e}", "status": "error"})
                 prob.update(importState="failed", errors=1, errorCode="STEP_FAILED",
-                            clientAction="retry", log=[{"text": f"Import crashed: {e}", "status": "error"}])
+                            clientAction="retry")
+                _persist(job)
                 continue
             prob.update(
                 problemId=res.get("problemId"),
@@ -113,10 +155,11 @@ async def _run_job(job: dict, groups, opts_common: dict, api_key: str, api_secre
                 alreadyVerified=res.get("alreadyVerified", False),
                 errorCode=res.get("errorCode"),
                 clientAction=res.get("clientAction"),
-                log=res.get("log", []),
                 importState="imported" if (res.get("ok") or res.get("alreadyVerified")) else "failed",
             )
+            _persist(job)  # checkpoint each problem's terminal state (survives restart)
     job["state"] = "failed" if any(p["importState"] == "failed" for p in job["problems"]) else "done"
+    _persist(job)
 
 
 async def _latest_package(problem_id: int, api_key: str, api_secret: str) -> Tuple[str, str, Optional[int], Optional[int]]:
@@ -152,7 +195,7 @@ async def verify_status(job_id: str, api_key: str, api_secret: str) -> Optional[
             verify = {"state": state, "code": code, "clientAction": action,
                       "comment": comment, "packageId": pkg_id, "revision": revision}
         out["verify"] = verify
-        out["log"] = p["log"]
+        out["log"] = list(p["log"])  # snapshot — the pipeline may still be appending
         out_problems.append(out)
     return {
         "jobId": job["jobId"],
