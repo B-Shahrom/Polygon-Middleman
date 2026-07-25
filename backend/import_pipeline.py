@@ -8,12 +8,14 @@ tests-only append mode.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import Dict, List, Optional
 
 from polygon_api import call_polygon
 from statement_parser import derive_dependencies_from_scoring, derive_points_from_scoring
+import activity_log as alog
 
 
 class Logger:
@@ -40,16 +42,31 @@ class _Api:
         self._key = api_key
         self._secret = api_secret
 
-    async def call(self, method: str, params: dict, files: Optional[dict] = None):
-        body, _ = await call_polygon(method, self._key, self._secret, params, files)
-        text = body.decode("utf-8", errors="replace")
-        try:
-            data = json.loads(text)
-        except Exception:
-            raise RuntimeError(f"{method}: non-JSON response ({text[:160]})")
-        if data.get("status") == "FAILED":
-            raise RuntimeError(data.get("comment", f"{method} failed"))
-        return data.get("result")
+    async def call(self, method: str, params: dict, files: Optional[dict] = None, retries: int = 3):
+        """Call Polygon, retrying TRANSIENT failures (a non-JSON HTML error page,
+        or a transport error) with backoff — Polygon intermittently returns HTML
+        instead of JSON, and one blip on e.g. saveFile shouldn't fail a whole
+        import. A real Polygon `FAILED` (valid JSON) is a genuine error and is NOT
+        retried. saveTest/saveFile/saveStatement are idempotent overwrites, so a
+        retry is safe."""
+        last = ""
+        for attempt in range(retries):
+            text = ""
+            try:
+                body, _ = await call_polygon(method, self._key, self._secret, params, files)
+                text = body.decode("utf-8", errors="replace")
+                data = json.loads(text)
+            except json.JSONDecodeError:
+                last = f"non-JSON response ({text[:120]})"      # Polygon returned an HTML page — transient
+            except Exception as e:                               # network / transport — transient
+                last = f"transport error: {e}"
+            else:
+                if data.get("status") == "FAILED":
+                    raise RuntimeError(data.get("comment", f"{method} failed"))
+                return data.get("result")
+            if attempt < retries - 1:
+                await asyncio.sleep(1.5 * (attempt + 1))
+        raise RuntimeError(f"{method}: {last} (after {retries} attempts)")
 
 
 def _cpp_file(name: str, code: str):
@@ -120,15 +137,16 @@ async def run_import_pipeline(parsed: Dict, opts: Dict, api_key: str, api_secret
     async def step(label: str, fn):
         nonlocal errors
         log.add(label, "running")
+        clean_label = re.sub(r"\.\.\.$", "", label)  # backslash-free f-string on <3.12
         try:
             msg = await fn()
-            log.update_last("done", msg or re.sub(r"\.\.\.$", "", label))
+            done_msg = msg or clean_label
+            log.update_last("done", done_msg)
+            alog.record("ok", "import", f"{slug}: {done_msg}")
         except Exception as e:
-            # NB: keep the re.sub OUT of the f-string — a backslash inside an
-            # f-string expression is a SyntaxError on Python < 3.12.
-            clean_label = re.sub(r"\.\.\.$", "", label)
             errors += 1
             log.update_last("error", f"{clean_label} — {e}")
+            alog.record("error", "import", f"{slug}: {clean_label} — {e}")
 
     # 1. Create-or-resolve
     problem_id: Optional[int] = None
