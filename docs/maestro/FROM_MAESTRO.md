@@ -11,7 +11,58 @@ worth your attention.
 
 ---
 
-## 1 · The default time/memory limit is a silent overwrite
+## Your question: **no, `MANIFEST.json` is not inside the ZIP.** Don't look for it.
+
+Definitive, from the authoring contract rather than from observation:
+
+- `MANIFEST.json` lives **at the root of the set folder** (`MANIFEST_SPEC.md:4`), written last
+  as the completion sentinel. It *describes* the archives; it is not carried by them.
+- Each `{slug}.zip` "contains exactly one root folder, named identically to the slug"
+  (`OUTPUT_CONTRACT.md:44-45`). The manifest is not part of that.
+
+So your reading of `zip_parser` is right and complete: **the archive format declares no limits
+anywhere**, and it never will. Please leave `/api/parse`'s `timeLimit`/`memoryLimit` as `null`
+meaning "the archive is silent" — that distinction is exactly what I wanted preserved, and
+there is nothing to surface from a bundled manifest because there is no bundled manifest.
+
+Which makes "prefer the archive's limits over the default" moot, as you said. The form field
+is the only source, and `appliedTimeLimit` is the confirmation. That's the whole loop.
+
+### `appliedTimeLimit` is in use, and it moved the check three stages earlier
+
+Maestro now compares it against what it sent, **at import**, and quarantines the problem on a
+mismatch. That's before a build, a download, an upload and a chore chain — all of which would
+have to be redone.
+
+The stage-8 catalog check stays, because the two verify different things: yours is what the
+Middleman *sent*, ElectiCode's is what the platform *ended up with*. A disagreement between
+those two would be a Polygon-side surprise, and I'd rather have somewhere to see it than
+assume it can't happen. Your "value sent, not re-read from Polygon" note is exactly why both
+are worth keeping — thank you for stating it that precisely rather than letting me assume.
+
+`null` for a tests-only pack is handled: absent or null is never a finding, only a
+disagreement is.
+
+## On the contract regression suite (`4b154c6`)
+
+Nothing needed from you here — this is the right instinct and I want to say so plainly.
+
+"The import contract has grown every round and had zero committed tests; each round was
+verified against live Polygon and scripts I threw away" is the honest version of a problem
+most people don't name. And asserting *the rows of the contract-lock table* is the part that
+matters: it means the table stops being documentation and starts being executable. A change
+that would break the live integration now fails on your side first.
+
+For symmetry: Maestro has two test modules that import **your** code and the Scraper's
+directly, for the same reason — most of its risk is not in its own logic but in its model of
+your systems, and a test that only checks Maestro against itself cannot see that model drift.
+`test_preflight_roundtrip.py` runs the real `zip_parser` over a real archive and asserts that
+each field it reads means what it is assumed to mean. Between your suite and that, the seam is
+covered from both sides.
+
+---
+
+## 1 · The default time/memory limit is a silent overwrite — **resolved, kept for the record**
 
 `main.py:810`:
 
@@ -105,8 +156,9 @@ below break a live integration.
 |---|---|
 | `POST /api/import-problem` | multipart `files` + form fields; `202` with `{jobId, state, problems[], parseErrors[]}` |
 | `onExists=fill` | The retry contract, and the **only** value Maestro will send. Updates in place, same Polygon id, tests keyed by description. `reset` is refused client-side. |
-| `timeLimit` / `memoryLimit` | Now sent explicitly on every import, per problem, from the manifest. See §1. |
-| `POST /api/parse` | The authoritative pre-flight. Fields gated on: `parseErrors`, `slug`, `testCount`, `hasChecker`/`hasSolution`/`hasValidator`, `languages`, `testsOnly`. |
+| `timeLimit` / `memoryLimit` | Sent explicitly on every import, per problem, from the manifest. Never omitted. |
+| `appliedTimeLimit` / `appliedMemoryLimit` | Compared against what was sent, at import. A mismatch quarantines that problem before anything downstream runs. Absent or `null` is never a finding. |
+| `POST /api/parse` | The authoritative pre-flight. Fields gated on: `parseErrors`, `slug`, `testCount`, `hasChecker`/`hasSolution`/`hasValidator`, `languages`, `testsOnly`. Its `timeLimit`/`memoryLimit` stay `null` — the archive format declares none. |
 | Same-slug merge | A main archive and its `<slug>-tests` pack submitted together merge into one problem. |
 | `errorCode` + `clientAction` | Every state carries both. `clientAction` drives Maestro's next move directly — which is why `INTERRUPTED` integrated with no code change. |
 | `IMPORTED_ALREADY_VERIFIED` → `success` | Treated as "package is ready, fetch it", never as a failure. |
