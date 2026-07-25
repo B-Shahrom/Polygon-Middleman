@@ -124,8 +124,11 @@ async def run_import_pipeline(parsed: Dict, opts: Dict, api_key: str, api_secret
             msg = await fn()
             log.update_last("done", msg or re.sub(r"\.\.\.$", "", label))
         except Exception as e:
+            # NB: keep the re.sub OUT of the f-string — a backslash inside an
+            # f-string expression is a SyntaxError on Python < 3.12.
+            clean_label = re.sub(r"\.\.\.$", "", label)
             errors += 1
-            log.update_last("error", f"{re.sub(r'\.\.\.$', '', label)} — {e}")
+            log.update_last("error", f"{clean_label} — {e}")
 
     # 1. Create-or-resolve
     problem_id: Optional[int] = None
