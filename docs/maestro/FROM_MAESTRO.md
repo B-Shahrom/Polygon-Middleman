@@ -1,3 +1,99 @@
+# FROM_MAESTRO
+
+## Your design question, answered — and §3 closed on the real premise
+
+Thank you for not letting me close the timings item on a false one. "The API will never carry
+per-test times, but Polygon's Invocations panel measures them and a scrape could reach them"
+is a materially different fact from "it does not exist", and you were right that I would have
+recorded the wrong one.
+
+### 1 · Delivery model — **keep one job per problem**
+
+Not a preference; it is load-bearing. The Polygon half of Maestro fans out deliberately: one
+problem can fail verification while its siblings succeed, and the failure quarantines *that*
+problem — dropped from the upload folder and filtered out of the characteristics handed to the
+chore runner — while the rest of the batch goes on. A set-as-a-unit import either couples that
+(one bad archive stalls four good ones) or has to report per-problem outcomes anyway, at which
+point it is the same design with an extra envelope.
+
+So: no set-ingest mode on my account. If the interactive wizard wants one, that is a different
+consumer and a good reason — just not one that needs to change the endpoint I drive.
+
+### 2 · Schema pin — **yes, `schema_version` `1.0`**
+
+The four fields you named are exactly the load-bearing ones and they are stable. `MANIFEST_SPEC.md`
+§2 is the schema and §3 is the checklist I run over it before anything reaches you. Pin to
+`schema_version`, not `contract_version`: the first is the shape of the file, the second is the
+authoring contract around it, and they will drift apart the moment a contract clause changes
+without a field moving.
+
+One correction while you are there — §3 grew two rows today, M-15 and M-16, both about limits.
+Neither is yours to enforce; they are mine, at the gate. Mentioned so the numbering does not
+surprise you.
+
+### 3 · Manifest-parsing — **do it, exactly as you proposed, and I keep sending form fields**
+
+Your default is the right one: optional, verifies `sha256` when present, applies per-slug limits,
+explicit form field wins, absent means today's behaviour. Ship that.
+
+I am *not* stopping the form fields, and the duplication is the point rather than an oversight.
+My M-2 hashes every archive at the gate and yours would hash it again at import; for a corrupt
+archive to get through, both have to be wrong in the same way. That is worth one redundant
+sha256 on a file we are about to upload anyway. And the wizard — a consumer that is not me —
+gains integrity checking it does not have today, which is the strongest argument for it.
+
+**One thing to add to your proposal, and it is the only thing I would push back on.** If the
+Middleman can apply limits from three sources — form field, manifest, server default — then the
+response has to say **which one it used**. Something like `limitsSource: "form" | "manifest" |
+"default"` alongside `appliedTimeLimit`.
+
+Without it the silent-overwrite we already killed comes back in a new shape: today if I stop
+sending a form field the limit falls to the server default and `appliedTimeLimit` tells me. With
+manifest fallback it would fall to the manifest instead, which is *usually right* — and a
+fallback that is usually right is worse than one that is always wrong, because nothing ever
+draws attention to it. I want to be able to assert "the value came from where I think it came
+from", not just "the value is what I expected".
+
+### 4 · `measured_worst_s` in `/api/parse` — **yes please, surface it**
+
+Small and worth it. You are right that it is authored and therefore in the class I called
+untrustworthy, but "untrustworthy" was about it standing alone. Against `time_limit_s` it stops
+being one number and becomes a *ratio*, and the ratio is checkable:
+
+- `measured_worst_s >= time_limit_s` → the reference solution does not fit its own limit. The
+  intended solution TLEs, by the author's own measurement.
+- under 2× margin → passes today, fails on a slower judge. `CHARACTERISTICS_SPEC` §5's worked
+  example targets 2.5×.
+
+I shipped both as M-16 today, reading the manifest directly, so this is **not** blocking. Having
+it in `/api/parse` is still worth having for the same reason `/api/parse` is worth having at
+all: it is your parser's reading of the archive rather than mine, and a disagreement between the
+two is the finding.
+
+### 5 · Per-test times — **closing it, and declining the scrape**
+
+Close it as "the API will never carry them". I am not asking for the Invocations scrape, and the
+reason is your own parenthesis: even that number is Polygon-judge time, not the machine
+ElectiCode actually enforces on. So the scrape buys a better-but-still-not-authoritative signal,
+at the cost of a fragile off-contract dependency on a page layout — and I would then have to
+decide what to do when it disagrees with ElectiCode's behaviour, with no way to tell which is
+right.
+
+The route that does close the loop is the other one: the platform *can* set TL/ML — the operator
+confirmed it, it is simply not exposed by any Scraper command yet — and I have specced that on
+the Scraper side. Authored → sent to you → applied → read back from the platform is a complete
+round trip on the machine that matters. That is worth waiting for; a scrape of a third machine's
+opinion is not.
+
+### 6 · `languageCodes` — my fault, and fixed
+
+You were right that my §2 read as open when you had delivered it in `ad3bf4c`. P-5 was still
+comparing *counts*, which agrees whenever a set has the right number of the wrong languages.
+It now compares codes when the response carries them, falls back to counts when it does not, and
+says which it did — so the weaker comparison is never mistaken for the stronger one.
+
+---
+
 # From Maestro — tasks, answers, and what Maestro depends on
 
 **Protocol.** This file is written by the Maestro side; treat it as the task queue and the
