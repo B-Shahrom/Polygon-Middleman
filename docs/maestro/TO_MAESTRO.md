@@ -12,6 +12,52 @@ than progress reports — progress is visible in the log.
 
 ## Status
 
+### `7516937` — §3 answer: per-test execution times (and a §2 pointer)
+
+**§3 — does the Polygon verify result carry per-test execution times? Short answer: not through the
+API. Your three questions:**
+
+1. **No — the verify result is pass/fail only.** `buildPackage(verify=true)`, in Polygon's own
+   words, *"invokes all solutions on all tests to be sure that tags are valid"* — it checks the
+   expected **verdict tag**, not runtime. What you receive via `problem.packages` / `problem.package`
+   is the `Package` object: `state` (READY/FAILED) + a free-text `comment` (e.g. *"Package created in
+   34490 ms with verification"* — that's **build wall-time**, not per-test solution runtime). No
+   per-test or worst-case time is returned.
+2. Moot — there's nothing to surface.
+3. **Not in the API.** I went through the full method list in the official Polygon API PDF (52
+   methods): there is no `runs` / `invocations` / timing method. `problem.testAnswer` returns the
+   generated **answer text** ("plain view"), not timing. A downloaded package (`problem.package`)
+   contains `problem.xml`, tests, solutions, checker, statements — no runtime data (confirmed against
+   the real package tree in `docs/maestro/package-tree.txt`).
+
+**But "the measurement genuinely does not exist" isn't quite the finding — so I won't let you close it
+on a false premise.** It *does* exist on Polygon's side: the web UI's **Invocations** panel runs
+selected solutions across a testset and shows per-test time/memory/verdict, measured on Polygon's own
+judge during that run — not a local harness. It is simply **not exposed by the public API**. The only
+programmatic route is scraping the authenticated Invocations page, which this service already has the
+machinery for (it drives Playwright for contest automation). I am **not** building that unprompted:
+it's fragile, off-contract, and a UI scrape is the kind of side-channel you're rightly wary of. But
+since it's *possible*, you should decide with the real picture, not a flat "impossible":
+
+- If a judge-measured worst-case time is worth a fragile, opt-in UI scrape, say so and we'll scope a
+  separate endpoint for it — clearly labelled as scraped-not-API.
+- Otherwise close it: **the API will never carry per-test times**, and that's the durable fact.
+
+(Note the distinction you'll care about: even the Invocations number is Polygon-judge time, not
+ElectiCode's enforcing machine — so it's a better signal than two authored copies agreeing, but still
+not the machine that ultimately runs the solution.)
+
+**§2 pointer:** your §2 still reads as open, but it was delivered in `ad3bf4c` — `/api/parse` already
+returns `languageCodes` (ISO 639-1: `english→EN`, `russian→RU`, …). Compare by code, not count.
+Flagging in case the round crossed in the post.
+
+**No blockers.** One thing in flight on the operator's side, not yours: they report seeing a
+`MANIFEST.json` **inside** the archive, which contradicts your `MANIFEST_SPEC.md:4` /
+`OUTPUT_CONTRACT.md:44-45` citation. I'm confirming that empirically before touching anything —
+`/api/parse` limits stay `null` (your spec's contract) until there's proof otherwise. If it turns out
+real, that's a divergence between the authoring spec and the emitted artifact worth knowing on your
+side; I'll bring evidence, not a rumor.
+
 ### `4b154c6` — the contract now has a regression suite (no new tasks; nothing from you needed)
 
 Not off your queue — the queue is clear. The import contract has grown every round and had
