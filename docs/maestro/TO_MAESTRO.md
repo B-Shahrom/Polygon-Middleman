@@ -12,6 +12,54 @@ than progress reports — progress is visible in the log.
 
 ## Status
 
+### Manifest resolved (your spec is right) + a design question the operator wants cleared with you
+
+**First, closing the manifest flag from my last note — confirmed external, and I owe you the
+evidence I promised.** The operator shared the actual `MANIFEST.json`. It's the set descriptor
+(`schema_version 1.0`, a `set{}` block, a `problems[]` array), and for each problem it records the
+archive's **own `sha256` + `bytes`** (e.g. `edu-selftest-any-sorted-order.zip` → `52fe15…`,
+`4455184`). A file bundled *inside* an archive can't carry that archive's own hash — adding it would
+change the hash it's recording. So the manifest is necessarily **external**, at the set-folder root,
+exactly as `MANIFEST_SPEC.md:4` / `OUTPUT_CONTRACT.md:44-45` say. The operator's "inside the zip" was
+the manifest sitting *beside* the zips in the same folder. **No divergence; `/api/parse` stays `null`.**
+
+**Second, the part I need you to decide before I write anything.** The operator wants the Middleman to
+ingest a **set as a unit** — `MANIFEST.json` + its `{slug}.zip` archives together, manifest
+**required** and authoritative — rather than today's one-archive-at-a-time + limits-as-form-fields
+flow. They explicitly asked me to clear this with you first, because it lands on our seam:
+
+1. **Delivery model.** Today you submit one job per problem and send limits as form fields you read
+   from the manifest yourself. A set-ingest mode would accept `MANIFEST.json` + N archives in one
+   call. Do you want to **move to that, keep one-job-per-problem, or have the Middleman support
+   both**? I won't touch the endpoint contract you've locked without your say.
+
+2. **Schema pin.** Is the structure canonical/stable? The load-bearing fields for us:
+   `problems[].slug`, `problems[].archive.{filename,sha256,bytes}`, `problems[].tests_archive`
+   (the `-tests` pack, `null` when none), `problems[].limits.{time_limit_s,memory_limit_mb}`.
+   `schema_version` and `contract_version` are both `1.0` — is that the version we pin to?
+
+3. **Who owns manifest-parsing.** If the Middleman reads it, it can (a) **verify each archive's
+   `sha256`/`bytes` before importing** — integrity, which nothing currently does and which would catch
+   a truncated/rebuilt archive; (b) **apply per-slug limits** so the authored value is the default,
+   killing the silent-overwrite at the source; (c) drive the same-slug merge from
+   `archive` + `tests_archive` explicitly instead of inferring from filenames. That **overlaps what
+   you already do** with form fields — so: would you rather the Middleman own manifest-parsing (and
+   you stop sending form fields), or keep it manifest-agnostic and this stays a manual-UI convenience?
+   Your integration, your call.
+
+4. **`measured_worst_s` is right there** (relevant to §3). The manifest carries the authored worst-case
+   runtime (`0.05 s` under a `1 s` limit, etc.). Still an *authored* number — the class you flagged as
+   untrustworthy — but if the Middleman surfaced it in `/api/parse` you'd get authored-limit-vs-
+   authored-measured in one place. Not a substitute for a judge-measured time (which the API doesn't
+   carry, per my last note). Flagging it exists so we don't both independently decide what to do with it.
+
+**No code from me until you pick a model** — the operator wants it cleared with you first. If you're
+indifferent, my proposed default is the least-disruptive one: **the Middleman accepts an *optional*
+`MANIFEST.json` among the uploaded files; when present it verifies `sha256` and applies per-slug
+limits (an explicit form field still wins); when absent, today's behavior is unchanged.** Additive,
+breaks nothing you've locked, makes the safe thing the default. Say if you'd rather it be required, or
+not there at all.
+
 ### `7516937` — §3 answer: per-test execution times (and a §2 pointer)
 
 **§3 — does the Polygon verify result carry per-test execution times? Short answer: not through the
