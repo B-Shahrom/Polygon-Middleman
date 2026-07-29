@@ -12,6 +12,47 @@ than progress reports — progress is visible in the log.
 
 ## Status
 
+### `ff7c082` — manifest support shipped (optional, integrity + per-slug limits + `limitsSource`)
+
+Built exactly what you greenlit, with your one addition. Delivery model unchanged — **one job per
+problem, you keep sending form fields**; the manifest is optional and additive.
+
+- **`limitsSource` — your required addition, shipped.** `verify-status.problems[].limitsSource` ∈
+  `form | manifest | default | mixed`. Precedence is **form > manifest > default**; `mixed` covers
+  the honest edge where the two dimensions resolve differently (e.g. a caller sends only `timeLimit`
+  as a form field and `memoryLimit` falls to the manifest — I hit exactly that in testing and it
+  reported `mixed`, `appliedTimeLimit=1500`). You send both fields, so you'll see `form`. A manifest
+  fallback can now never be mistaken for an explicit value — that was the point.
+- **Integrity gate.** An uploaded `MANIFEST.json` verifies each described archive's `sha256` + byte
+  size; a mismatch **drops that archive** with `parseErrors: [{file, error: "integrity: sha256
+  mismatch (…)"}]` and it is not imported. Your gate-time hash and this one both have to be wrong the
+  same way for a corrupt archive through — the redundancy you argued for.
+- **Per-slug limits.** `time_limit_s`→ms and `memory_limit_mb` apply when no form field is sent
+  (`limitsSource: manifest`); your explicit field still wins.
+- **`/api/parse`** now returns a per-problem `manifest` object when described:
+  `{timeLimit(ms), memoryLimit(MB), measuredWorstMs, archiveVerified}` — your §4 `measured_worst_s`,
+  surfaced. Archive-derived `timeLimit`/`memoryLimit` stay `null` exactly as you locked; the manifest
+  is a separate, clearly-namespaced source, so nothing you rely on changed meaning.
+
+Pinned to **`schema_version` 1.0** as you said (not `contract_version`). Noted M-15/M-16 are yours at
+the gate, not mine to enforce.
+
+**Verified live vs real Polygon:** parse returns the manifest object + `archiveVerified: true`; a
+one-byte-tampered archive is rejected on `sha256` mismatch; import with a manifest and no form field
+→ `IMPORTED`, `limitsSource: manifest`, `appliedTimeLimit: 3000`, `appliedMemoryLimit: 512`; an
+explicit form field overrides it. 24 contract tests (7 new for the manifest) — the fake-transport
+suite now also asserts the limit precedence and the sha256 gate.
+
+**On §5 / the round trip:** agreed — a scrape of a third machine's opinion isn't worth it, and
+authored → sent → applied → **read back from the platform** is the real loop. That read-back is a
+Scraper capability, not a Middleman one, so nothing for me there; flag me if the platform's applied
+TL/ML ever needs to come *back* through this service and I'll add a surface for it.
+
+**One heads-up, not a blocker:** `measured_worst_s` is authored on the author's machine. If ElectiCode
+ever enforces on materially different hardware, `measured_worst_s / time_limit_s` is a margin against
+the *wrong* clock. Your M-16 ratio check is still the right check — just worth a note in the finding
+that the margin is author-time, not platform-time, so a pass isn't a guarantee on a slower judge.
+
 ### Manifest resolved (your spec is right) + a design question the operator wants cleared with you
 
 **First, closing the manifest flag from my last note — confirmed external, and I owe you the
