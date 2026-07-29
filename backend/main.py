@@ -737,23 +737,42 @@ async def parse_archives(files: List[UploadFile] = File(...)):
     truth (the backend parser), instead of a separate client-side guess. No
     credentials required.
 
-    Note on limits: the problem-archive format carries NO time/memory limits, so
-    `timeLimit`/`memoryLimit` are reported as `null` — the archive declares nothing,
-    and the import applies the caller's form field or the server default (see the
-    import endpoint). They are NOT filled with the default here, on purpose: `null`
-    means 'archive is silent', which is the signal a pre-flight limit-check needs."""
+    Note on limits: the problem-ARCHIVE format carries NO time/memory limits, so
+    `timeLimit`/`memoryLimit` stay `null` — the archive declares nothing, and `null`
+    means 'archive is silent', which is the signal a pre-flight limit-check needs.
+    If an optional `MANIFEST.json` is uploaded with the archives, each problem it
+    describes also gets a `manifest` object: the authored `timeLimit`/`memoryLimit`
+    (ms / MB), the authored `measuredWorstMs`, and `archiveVerified` (whether the
+    archive's sha256/size matched). Absent a manifest, `manifest` is `null`."""
     import zip_parser as zp
     from statement_parser import iso_639_1
+    import manifest as mf
 
     try:
-        parsed_items = []
+        # An optional MANIFEST.json may travel with the archives; separate it out.
+        manifest = None
+        archives = []          # (filename, content)
         parse_errors = []
         for f in files:
             content = await f.read()
+            if mf.looks_like_manifest(f.filename, content):
+                try:
+                    manifest = mf.parse_manifest(content)
+                except mf.ManifestError as e:
+                    parse_errors.append({"file": f.filename, "error": f"manifest: {e}"})
+                continue
+            archives.append((f.filename, content))
+
+        parsed_items = []
+        for fname, content in archives:
             try:
-                parsed_items.append(zp.parse_zip(content))
+                p = zp.parse_zip(content)
             except Exception as e:
-                parse_errors.append({"file": f.filename, "error": str(e)})
+                parse_errors.append({"file": fname, "error": str(e)})
+                continue
+            # None = manifest doesn't describe this file; True/False = matched or not.
+            p["_verified"] = mf.archive_verified(manifest, fname, content)
+            parsed_items.append(p)
 
         # Same grouping as the import: tests-only packs key by base slug so they
         # merge with / append to their base problem.
@@ -767,6 +786,13 @@ async def parse_archives(files: List[UploadFile] = File(...)):
             m = zp.merge_parsed_group(items)
             groups = sorted({t["group"] for t in m["tests"]}, key=lambda g: int(g)) if m["tests"] else []
             lang_names = list(m["languages"].keys())
+            # Manifest reading for this slug (declared limits + authored worst-case),
+            # and archive integrity across the group: False if any described archive
+            # mismatched, True if any matched, None if the manifest describes none.
+            mlim = mf.limits_for(manifest, slug)
+            vers = [it.get("_verified") for it in items]
+            archive_verified = False if any(v is False for v in vers) else \
+                (True if any(v is True for v in vers) else None)
             problems.append({
                 "slug": slug,
                 "name": m.get("displayName") or slug,
@@ -785,9 +811,18 @@ async def parse_archives(files: List[UploadFile] = File(...)):
                 "hasScoring": m["hasScoring"],
                 "groups": groups,
                 "archiveCount": len(items),
-                # The archive format declares no limits; null = 'archive is silent'.
+                # The ARCHIVE declares no limits; these stay null (archive is silent).
                 "timeLimit": None,
                 "memoryLimit": None,
+                # Present only when an uploaded MANIFEST.json describes this slug: the
+                # authored limits (ms / MB) + the authored worst-case runtime, plus
+                # whether the archive's sha256/size matched the manifest.
+                "manifest": ({
+                    "timeLimit": mlim["timeLimit"],
+                    "memoryLimit": mlim["memoryLimit"],
+                    "measuredWorstMs": mlim["measuredWorstMs"],
+                    "archiveVerified": archive_verified,
+                } if mlim else None),
             })
     except Exception as e:
         import traceback
@@ -819,6 +854,7 @@ async def import_problem(
     200 with `status:"FAILED"` in the body — read the body there, not the code.)"""
     import zip_parser as zp
     import import_jobs
+    import manifest as mf
 
     api_key, api_secret = get_creds()
     settings = _import_defaults()
@@ -834,15 +870,36 @@ async def import_problem(
     # would give Maestro an opaque error. Any crash is logged with a full traceback
     # to the activity log and returned as a readable 500 detail.
     try:
-        parsed_items = []
+        # An optional MANIFEST.json may travel with the archives; separate it out.
+        manifest = None
+        archives = []          # (filename, content)
         parse_errors = []
         for f in files:
             content = await f.read()
+            if mf.looks_like_manifest(f.filename, content):
+                try:
+                    manifest = mf.parse_manifest(content)
+                except mf.ManifestError as e:
+                    parse_errors.append({"file": f.filename, "error": f"manifest: {e}"})
+                    alog.record("error", "import", f"manifest parse failed: {f.filename} — {e}")
+                continue
+            archives.append((f.filename, content))
+
+        parsed_items = []
+        for fname, content in archives:
+            # Integrity gate: if the manifest describes this archive and the hash or
+            # size disagrees, refuse it — a corrupt/rebuilt archive must not import.
+            if manifest is not None:
+                err = mf.verify_archive(manifest, fname, content)
+                if err:
+                    parse_errors.append({"file": fname, "error": f"integrity: {err}"})
+                    alog.record("error", "import", f"integrity: {fname} — {err}")
+                    continue
             try:
                 parsed_items.append(zp.parse_zip(content))
             except Exception as e:
-                parse_errors.append({"file": f.filename, "error": str(e)})
-                alog.record("error", "import", f"parse failed: {f.filename} — {e}")
+                parse_errors.append({"file": fname, "error": str(e)})
+                alog.record("error", "import", f"parse failed: {fname} — {e}")
 
         # Group by slug; tests-only packs key by base slug so they merge / append.
         grouped: dict = {}
@@ -851,7 +908,22 @@ async def import_problem(
             grouped.setdefault(key, []).append(p)
         groups = [(slug, zp.merge_parsed_group(items)) for slug, items in grouped.items()]
 
-        job = import_jobs.create_job(groups, opts_common, parse_errors, api_key, api_secret)
+        # Resolve per-slug limits: explicit form field > manifest > server default.
+        # `limitsSource` (form|manifest|default|mixed) travels on the job so a
+        # manifest fallback can never be mistaken for an explicit value.
+        d_tl, d_ml = settings["default_time_limit"], settings["default_memory_limit"]
+        limits_by_slug: dict = {}
+        for slug, _merged in groups:
+            mlim = mf.limits_for(manifest, slug) or {}
+            tl, tl_src = mf.resolve_limit(timeLimit, mlim.get("timeLimit"), d_tl)
+            ml, ml_src = mf.resolve_limit(memoryLimit, mlim.get("memoryLimit"), d_ml)
+            limits_by_slug[slug] = {
+                "timeLimit": tl, "memoryLimit": ml,
+                "source": tl_src if tl_src == ml_src else "mixed",
+            }
+
+        job = import_jobs.create_job(groups, opts_common, parse_errors, api_key, api_secret,
+                                     limits_by_slug=limits_by_slug)
     except Exception as e:
         import traceback
         tb = traceback.format_exc()

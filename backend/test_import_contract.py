@@ -37,6 +37,7 @@ from import_pipeline import (
     _Api, _classify, _is_already_verified, _plan_test_uploads, run_import_pipeline,
 )
 import zip_parser as zp
+import import_jobs
 from statement_parser import iso_639_1
 
 
@@ -334,6 +335,99 @@ class TestJobStore(unittest.TestCase):
         self.assertEqual(j["problems"][0]["clientAction"], "retry")
         self.assertEqual(j["problems"][1]["importState"], "imported")   # completed sibling preserved
         self.assertEqual(j["state"], "failed")
+
+
+# ── Manifest support ──────────────────────────────────────────────────────────
+
+import hashlib
+import manifest as mf
+
+OPTS_COMMON = {"timeLimit": 1000, "memoryLimit": 256, "onExists": "fill",
+               "checkerType": "cpp.g++17", "solutionType": "cpp.g++17"}
+
+
+def make_manifest(slug="edu-demo-problem", archive_bytes=None, *,
+                  time_limit_s=2, memory_limit_mb=512, measured_worst_s=0.05,
+                  schema_version="1.0") -> bytes:
+    entry = {
+        "idx": 1, "slug": slug,
+        "archive": {
+            "filename": f"{slug}.zip",
+            "sha256": hashlib.sha256(archive_bytes).hexdigest() if archive_bytes is not None else "0" * 64,
+            "bytes": len(archive_bytes) if archive_bytes is not None else 0,
+        },
+        "tests_archive": None,
+        "limits": {"time_limit_s": time_limit_s, "memory_limit_mb": memory_limit_mb,
+                   "measured_worst_s": measured_worst_s},
+    }
+    return json.dumps({"schema_version": schema_version, "set": {"name": "t"},
+                       "problems": [entry]}).encode()
+
+
+class TestManifestModule(unittest.TestCase):
+    def test_parse_units_seconds_to_ms(self):
+        m = mf.parse_manifest(make_manifest(time_limit_s=2, memory_limit_mb=512, measured_worst_s=0.05))
+        e = m["problems"]["edu-demo-problem"]
+        self.assertEqual(e["timeLimit"], 2000)          # time_limit_s → ms
+        self.assertEqual(e["memoryLimit"], 512)         # MB stays MB
+        self.assertEqual(e["measuredWorstMs"], 50)      # measured_worst_s → ms
+
+    def test_unsupported_schema_raises(self):
+        with self.assertRaises(mf.ManifestError):
+            mf.parse_manifest(make_manifest(schema_version="2.0"))
+
+    def test_looks_like_manifest(self):
+        self.assertTrue(mf.looks_like_manifest("MANIFEST.json", b"{}"))
+        self.assertTrue(mf.looks_like_manifest("x.json", make_manifest()))     # content sniff
+        self.assertFalse(mf.looks_like_manifest("problem.zip", make_zip()))    # a ZIP (PK)
+
+    def test_verify_archive_match_mismatch_undescribed(self):
+        z = make_zip()
+        m = mf.parse_manifest(make_manifest(archive_bytes=z))
+        self.assertIsNone(mf.verify_archive(m, "edu-demo-problem.zip", z))              # matches
+        self.assertIsNotNone(mf.verify_archive(m, "edu-demo-problem.zip", z + b"x"))    # tampered
+        self.assertIsNone(mf.verify_archive(m, "not-in-manifest.zip", z))               # undescribed → skip
+
+    def test_archive_verified_flag(self):
+        z = make_zip()
+        m = mf.parse_manifest(make_manifest(archive_bytes=z))
+        self.assertIs(mf.archive_verified(m, "edu-demo-problem.zip", z), True)
+        self.assertIs(mf.archive_verified(m, "edu-demo-problem.zip", z + b"x"), False)
+        self.assertIsNone(mf.archive_verified(m, "other.zip", z))     # undescribed
+        self.assertIsNone(mf.archive_verified(None, "edu-demo-problem.zip", z))  # no manifest
+
+    def test_resolve_limit_precedence(self):
+        self.assertEqual(mf.resolve_limit(2000, 1500, 1000), (2000, "form"))     # form wins
+        self.assertEqual(mf.resolve_limit(None, 1500, 1000), (1500, "manifest")) # then manifest
+        self.assertEqual(mf.resolve_limit(None, None, 1000), (1000, "default"))  # then default
+
+
+class TestManifestIntegration(unittest.TestCase):
+    def test_manifest_limit_is_applied_and_source_recorded(self):
+        # Drives the real create_job → _run_job with a per-slug manifest limit and
+        # asserts it lands (appliedTimeLimit) with the source labelled.
+        async def go():
+            saved = import_jobs._persist
+            import_jobs._persist = lambda job: None      # no DB writes in the test
+            try:
+                with FakeTransport(FakePolygon()):
+                    job = import_jobs.create_job(
+                        [("edu-demo-problem", zp.parse_zip(make_zip()))],
+                        OPTS_COMMON, [], "k", "s",
+                        limits_by_slug={"edu-demo-problem":
+                                        {"timeLimit": 2000, "memoryLimit": 512, "source": "manifest"}})
+                    source_at_creation = job["problems"][0]["limitsSource"]
+                    others = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+                    await asyncio.gather(*others)
+                return source_at_creation, job
+            finally:
+                import_jobs._persist = saved
+        source, job = asyncio.run(go())
+        p = job["problems"][0]
+        self.assertEqual(source, "manifest")               # set synchronously at creation
+        self.assertEqual(p["limitsSource"], "manifest")
+        self.assertEqual(p["appliedTimeLimit"], 2000)      # manifest value overrode opts_common
+        self.assertEqual(p["appliedMemoryLimit"], 512)
 
 
 if __name__ == "__main__":

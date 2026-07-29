@@ -77,7 +77,7 @@ _VERIFY_ACTION = {
 _PUBLIC_FIELDS = (
     "slug", "name", "problemId", "importState", "errors", "verifyRequested",
     "alreadyVerified", "errorCode", "clientAction", "testsOnly", "testCount",
-    "appliedTimeLimit", "appliedMemoryLimit",
+    "appliedTimeLimit", "appliedMemoryLimit", "limitsSource",
 )
 
 
@@ -101,10 +101,12 @@ def job_problem_ids(job_id: str) -> List[int]:
 
 
 def create_job(groups: List[Tuple[str, dict]], opts_common: dict, parse_errors: list,
-               api_key: str, api_secret: str) -> dict:
-    """`groups` = [(slug, merged_parsed_dict), ...]. Starts the background runner
-    and returns the initial (queued) job record."""
+               api_key: str, api_secret: str, limits_by_slug: Optional[dict] = None) -> dict:
+    """`groups` = [(slug, merged_parsed_dict), ...]. `limits_by_slug` maps slug →
+    {timeLimit, memoryLimit, source} (resolved form>manifest>default upstream).
+    Starts the background runner and returns the initial (queued) job record."""
     job_id = uuid.uuid4().hex[:16]
+    limits_by_slug = limits_by_slug or {}
     problems = [{
         "slug": slug,
         "name": merged.get("displayName") or slug,
@@ -119,6 +121,9 @@ def create_job(groups: List[Tuple[str, dict]], opts_common: dict, parse_errors: 
         "clientAction": None,
         "appliedTimeLimit": None,
         "appliedMemoryLimit": None,
+        # Where the applied limits came from (form|manifest|default|mixed) — set even
+        # before the import runs, since it's resolved at request time.
+        "limitsSource": limits_by_slug.get(slug, {}).get("source"),
         "log": [],
     } for slug, merged in groups]
 
@@ -131,15 +136,24 @@ def create_job(groups: List[Tuple[str, dict]], opts_common: dict, parse_errors: 
     }
     _JOBS[job_id] = job
     _persist(job)
-    asyncio.create_task(_run_job(job, groups, opts_common, api_key, api_secret))
+    asyncio.create_task(_run_job(job, groups, opts_common, api_key, api_secret, limits_by_slug))
     return job
 
 
-async def _run_job(job: dict, groups, opts_common: dict, api_key: str, api_secret: str):
+async def _run_job(job: dict, groups, opts_common: dict, api_key: str, api_secret: str,
+                   limits_by_slug: Optional[dict] = None):
+    limits_by_slug = limits_by_slug or {}
     for (slug, merged), prob in zip(groups, job["problems"]):
         prob["importState"] = "running"
         async with _slug_lock(slug):  # serialize same-slug across all jobs
+            # Per-slug limits (form>manifest>default, resolved upstream) override the
+            # request-level fallback in opts_common.
+            lim = limits_by_slug.get(slug, {})
             opts = {**opts_common, "slug": slug}
+            if "timeLimit" in lim:
+                opts["timeLimit"] = lim["timeLimit"]
+            if "memoryLimit" in lim:
+                opts["memoryLimit"] = lim["memoryLimit"]
             try:
                 # Pass the problem's own log list as the sink so steps stream into
                 # the job record live (verify-status reads it), not only at the end.

@@ -86,3 +86,28 @@ Fetched **live** from Polygon on each `GET /api/verify-status/{jobId}` (`import_
   Send `2000` and check `appliedTimeLimit == 2000` on a problem whose `errorCode` is `IMPORTED`
   — that closes the loop instead of sending-and-hoping. (It's the value the middleman sent, not
   a re-read from Polygon; with `errorCode: IMPORTED` the `updateInfo` call returned OK.)
+- **Know WHERE the limit came from:** `verify-status.problems[].limitsSource` ∈
+  `form | manifest | default | mixed`. `form` = an explicit `timeLimit`/`memoryLimit` field;
+  `manifest` = taken from an uploaded `MANIFEST.json` (below); `default` = the server default;
+  `mixed` = the two dimensions came from different sources (e.g. `timeLimit` from a form field,
+  `memoryLimit` from the manifest). Precedence is always **form > manifest > default**. This
+  exists so a manifest fallback (usually right) can never be silently mistaken for an explicit
+  value — assert the source, not just the number.
+
+### Optional `MANIFEST.json` (set descriptor) travelling with the archives
+
+Upload it as one of the multipart `files` (named `MANIFEST.json`, or any `.json` carrying
+`schema_version` + `problems`). Optional — absent, everything below is unchanged. Pinned to
+`schema_version` `1.0`.
+
+- **Integrity gate.** For every uploaded archive the manifest describes (by filename), the
+  Middleman verifies its `sha256` and byte size. A mismatch **drops that archive** and reports it
+  in `parseErrors` as `{file, error: "integrity: sha256 mismatch (…)"}` — the problem is NOT
+  imported. A second, independent gate to Maestro's own gate-time hash.
+- **Limits.** Each `problems[].limits.time_limit_s` (→ ms) / `memory_limit_mb` becomes the
+  per-slug limit **when no explicit form field is sent** (`limitsSource: manifest`). An explicit
+  form field still wins (`limitsSource: form`).
+- **`/api/parse`** surfaces a per-problem `manifest` object when the manifest describes that slug:
+  `{timeLimit (ms), memoryLimit (MB), measuredWorstMs, archiveVerified}`. Absent a manifest (or an
+  undescribed slug) it is `null`. The archive-derived `timeLimit`/`memoryLimit` stay `null` as
+  always — the manifest is a separate, clearly-namespaced source.
