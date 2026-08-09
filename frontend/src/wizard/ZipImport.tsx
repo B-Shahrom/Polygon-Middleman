@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Archive, Upload, Loader2, Copy, RotateCcw, History, Plus, Trash2 } from 'lucide-react';
+import { Archive, Upload, Loader2, Copy, RotateCcw, History, Plus, Trash2, FileText, X } from 'lucide-react';
 import JSZip from 'jszip';
 import { api, AppSettings } from '../api/client';
 import { useApp } from '../context/AppContext';
@@ -41,6 +41,11 @@ export default function ZipImport({ open, onClose }: Props) {
   const [diffs, setDiffs] = useState<Record<number, DiffInfo | 'loading'>>({});
   const [settings, setSettings] = useState<AppSettings>(FALLBACK_SETTINGS);
   const [concurrency, setConcurrency] = useState(2);
+  // Batch-level side files: an authoring characteristics.md / MANIFEST.json can be
+  // dropped alongside the zips. When present (and deriving is on) the backend derives
+  // per-slug TL/ML + the checker, so we OMIT the per-problem limit form fields.
+  const [aux, setAux] = useState<{ characteristics?: File; manifest?: File }>({});
+  const [deriveFromChars, setDeriveFromChars] = useState(true);
   const [batch, setBatch] = useState<BatchOverride>({
     enabled: false,
     timeLimit: FALLBACK_SETTINGS.default_time_limit,
@@ -114,6 +119,7 @@ export default function ZipImport({ open, onClose }: Props) {
     setItems([]);
     setDiffs({});
     setExistingByName(new Map());
+    setAux({});
     setShowHistory(false);
     setPhase(jobs.length > 0 ? 'queue' : 'select');
     onClose();
@@ -122,8 +128,27 @@ export default function ZipImport({ open, onClose }: Props) {
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const fileList = e.target.files;
     if (!fileList || fileList.length === 0) return;
-    const files = Array.from(fileList);
+    const all = Array.from(fileList);
     e.target.value = '';
+
+    // Split off the batch-level side files. A characteristics.md / MANIFEST.json can
+    // be dropped together with the zips; they apply to the whole batch, not one zip.
+    const charFile = all.find(f => /characteristics.*\.md$/i.test(f.name)) || all.find(f => /\.md$/i.test(f.name));
+    const manFile = all.find(f => /manifest.*\.json$/i.test(f.name)) || all.find(f => /\.json$/i.test(f.name));
+    if (charFile || manFile) {
+      setAux((a) => ({
+        characteristics: charFile || a.characteristics,
+        manifest: manFile || a.manifest,
+      }));
+      if (charFile || manFile) setDeriveFromChars(true);
+    }
+    const files = all.filter(f => /\.zip$/i.test(f.name));
+    if (files.length === 0) {
+      // Only side files were added (e.g. attaching characteristics after the zips).
+      if (charFile) toast('info', `Attached ${charFile.name} — limits & checker will be derived per problem`);
+      if (manFile) toast('info', `Attached ${manFile.name} — sha256 verified, limits derived`);
+      return;
+    }
 
     setDiffs({});
     setParsing(true);
@@ -199,6 +224,11 @@ export default function ZipImport({ open, onClose }: Props) {
       bySlug.set(key, arr);
     }
 
+    // Side files (characteristics.md / MANIFEST.json) ride along with EVERY job so
+    // the backend can derive that problem's TL/ML + checker by slug.
+    const auxFiles = [aux.characteristics, aux.manifest].filter(Boolean) as File[];
+    const deriving = deriveFromChars && auxFiles.length > 0;
+
     const newJobs: ImportJob[] = Array.from(bySlug.entries()).map(([slug, groupItems]) => {
       // Representative = the main archive (carries content), else the first.
       const rep = groupItems.find(it => {
@@ -210,8 +240,10 @@ export default function ZipImport({ open, onClose }: Props) {
       const merged = mergeParsedGroup(groupItems.map(it => it.parsed!));
       const opts: ImportOpts = {
         slug,
-        timeLimit: batch.enabled ? batch.timeLimit : rep.timeLimit,
-        memoryLimit: batch.enabled ? batch.memoryLimit : rep.memoryLimit,
+        // When deriving, OMIT the limit fields so the backend uses the manifest /
+        // characteristics value (an explicit field would override it).
+        timeLimit: deriving ? undefined : (batch.enabled ? batch.timeLimit : rep.timeLimit),
+        memoryLimit: deriving ? undefined : (batch.enabled ? batch.memoryLimit : rep.memoryLimit),
         onExists: rep.onExists,
         checkerType: batch.enabled ? batch.checkerType : settings.checker_source_type,
         solutionType: batch.enabled ? batch.solutionType : settings.solution_source_type,
@@ -221,7 +253,7 @@ export default function ZipImport({ open, onClose }: Props) {
         : groupItems.length > 1 ? `${merged.displayName} (${groupItems.length} archives)` : merged.displayName;
       return {
         id: `job-${++jobSeq}`, batchId, name, slug,
-        files: groupItems.map(it => it.file), opts, status: 'queued' as const, log: [], errors: 0,
+        files: [...groupItems.map(it => it.file), ...auxFiles], opts, status: 'queued' as const, log: [], errors: 0,
       };
     });
 
@@ -346,27 +378,58 @@ export default function ZipImport({ open, onClose }: Props) {
               <>
                 <Archive className="w-8 h-8 text-gray-500 mb-2" />
                 <span className="text-sm text-gray-500">Click to select ZIP file(s)</span>
-                <span className="text-xs text-gray-600 mt-1">select multiple to batch-import · add more anytime while the queue runs</span>
+                <span className="text-xs text-gray-600 mt-1">select multiple to batch-import · drop <span className="font-mono">characteristics.md</span> / <span className="font-mono">MANIFEST.json</span> in too · add more anytime</span>
               </>
             )}
-            <input ref={fileRef} type="file" accept=".zip" multiple className="sr-only" onChange={handleFileSelect} disabled={parsing} />
+            <input ref={fileRef} type="file" accept=".zip,.md,.json" multiple className="sr-only" onChange={handleFileSelect} disabled={parsing} />
           </label>
         </div>
       )}
 
       {phase === 'preview' && items.length > 0 && (
-        <PreviewList
-          items={items}
-          updateItem={updateItem}
-          batch={batch}
-          setBatch={setBatch}
-          existingByName={existingByName}
-          diffs={diffs}
-          loadDiff={loadDiff}
-          hideDiff={hideDiff}
-          okCount={okCount}
-          badCount={badCount}
-        />
+        <div className="space-y-3">
+          {(aux.characteristics || aux.manifest) && (
+            <div className="text-xs bg-amber-500/10 border border-amber-500/20 rounded-lg p-3 space-y-2">
+              <div className="flex items-center flex-wrap gap-2">
+                {aux.characteristics && (
+                  <span className="inline-flex items-center gap-1 bg-[#1a1714] rounded px-2 py-1 font-mono text-amber-300">
+                    <FileText className="w-3 h-3" />{aux.characteristics.name}
+                    <button onClick={() => setAux(a => ({ ...a, characteristics: undefined }))} className="ml-1 text-gray-500 hover:text-red-400"><X className="w-3 h-3" /></button>
+                  </span>
+                )}
+                {aux.manifest && (
+                  <span className="inline-flex items-center gap-1 bg-[#1a1714] rounded px-2 py-1 font-mono text-amber-300">
+                    <FileText className="w-3 h-3" />{aux.manifest.name}
+                    <button onClick={() => setAux(a => ({ ...a, manifest: undefined }))} className="ml-1 text-gray-500 hover:text-red-400"><X className="w-3 h-3" /></button>
+                  </span>
+                )}
+              </div>
+              <label className="flex items-center gap-2 text-amber-200 cursor-pointer">
+                <input type="checkbox" checked={deriveFromChars} onChange={e => setDeriveFromChars(e.target.checked)} className="accent-amber-500" />
+                Derive time / memory limits &amp; checker per problem from these files
+              </label>
+              {deriveFromChars && (
+                <p className="text-amber-300/70">
+                  Per-problem TL/ML below are ignored — the backend applies each slug's value
+                  (a standard checker like <span className="font-mono">ncmp</span> is set by name, no upload).
+                  {aux.manifest && ' Archive sha256 is verified against the manifest.'}
+                </p>
+              )}
+            </div>
+          )}
+          <PreviewList
+            items={items}
+            updateItem={updateItem}
+            batch={batch}
+            setBatch={setBatch}
+            existingByName={existingByName}
+            diffs={diffs}
+            loadDiff={loadDiff}
+            hideDiff={hideDiff}
+            okCount={okCount}
+            badCount={badCount}
+          />
+        </div>
       )}
 
       {phase === 'queue' && (

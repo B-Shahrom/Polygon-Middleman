@@ -57,11 +57,14 @@ export const FALLBACK_SETTINGS: AppSettings = {
   default_memory_limit: 256,
 };
 
-/** Per-problem, user-editable overrides applied at import time. */
+/** Per-problem, user-editable overrides applied at import time. `timeLimit`/
+ *  `memoryLimit` are OMITTED (undefined) when deriving from a characteristics.md /
+ *  MANIFEST.json — the backend then resolves them per slug (form > manifest >
+ *  characteristics > default), and an explicit value here would override that. */
 export interface ImportOpts {
   slug: string;
-  timeLimit: number;
-  memoryLimit: number;
+  timeLimit?: number;
+  memoryLimit?: number;
   onExists: OnExists;
   checkerType: string;
   solutionType: string;
