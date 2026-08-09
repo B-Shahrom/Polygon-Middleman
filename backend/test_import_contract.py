@@ -440,5 +440,56 @@ class TestManifestIntegration(unittest.TestCase):
         self.assertEqual(p["appliedMemoryLimit"], 512)
 
 
+# ── characteristics.md → limits ───────────────────────────────────────────────
+
+import characteristics as ch
+
+CHARACTERISTICS_SAMPLE = (
+    "# Characteristics — Test Batch\n\n_desc_\n\n---\n\n## General\n\n"
+    "| idx | slug | title | languages | group | tests | subtasks | checker | TL | ML |\n"
+    "|-----|------|-------|-----------|-------|-------|----------|---------|-----|------|\n"
+    "| 1 | edu-a-school-bag | School Bag | EN | easy | 29 (2+27) | none | ncmp (native) | 1 s | 256 MB |\n"
+    "| 2 | edu-a-two-budgets | Two Budgets | EN, RU | medium | 27 (2+25) | none | ncmp (native) | 2 s | 256 MB |\n"
+    "| 3 | edu-a-dnc-restore | Memory-Limited | EN | hard | 19 (2+17) | none | custom | 2 s | 64 MB |\n"
+    "| 4 | edu-a-segtree | Range Queries | EN | hard | 19 (2+17) | none | ncmp (native) | 3 s | 512 MB |\n"
+    "| 5 | edu-a-na | NA Problem | EN | easy | 10 (2+8) | none | ncmp (native) | N/A | 256 MB |\n\n"
+    "---\n\n## Example (inside a fence — must be ignored)\n\n"
+    "```\n"
+    "| idx | slug | title | languages | group | tests | subtasks | checker | TL | ML |\n"
+    "|---|---|---|---|---|---|---|---|---|---|\n"
+    "| 9 | edu-FAKE | Fake | EN | easy | 1 (1+0) | none | ncmp (native) | 99 s | 9999 MB |\n"
+    "```\n"
+)
+
+
+class TestCharacteristics(unittest.TestCase):
+    def test_derive_limits_normalized_units(self):
+        lim = ch.derive_limits_from_characteristics(CHARACTERISTICS_SAMPLE)
+        self.assertEqual(lim["edu-a-school-bag"], {"timeLimit": 1000, "memoryLimit": 256})
+        self.assertEqual(lim["edu-a-two-budgets"], {"timeLimit": 2000, "memoryLimit": 256})
+        self.assertEqual(lim["edu-a-dnc-restore"], {"timeLimit": 2000, "memoryLimit": 64})
+        self.assertEqual(lim["edu-a-segtree"], {"timeLimit": 3000, "memoryLimit": 512})
+
+    def test_na_limit_is_none_not_wrong_number(self):
+        lim = ch.derive_limits_from_characteristics(CHARACTERISTICS_SAMPLE)
+        self.assertEqual(lim["edu-a-na"], {"timeLimit": None, "memoryLimit": 256})
+
+    def test_fenced_table_is_ignored(self):
+        lim = ch.derive_limits_from_characteristics(CHARACTERISTICS_SAMPLE)
+        self.assertNotIn("edu-FAKE", lim)          # the code-fence example must not leak in
+        self.assertEqual(len(lim), 5)              # exactly the 5 General-table rows
+
+    def test_unit_parsers(self):
+        self.assertEqual(ch.parse_time_ms("1 s"), 1000)
+        self.assertEqual(ch.parse_time_ms("2000 ms"), 2000)
+        self.assertEqual(ch.parse_time_ms("1.5 s"), 1500)
+        self.assertIsNone(ch.parse_time_ms("N/A"))
+        self.assertIsNone(ch.parse_time_ms(""))
+        self.assertEqual(ch.parse_memory_mb("256 MB"), 256)
+        self.assertEqual(ch.parse_memory_mb("1 GB"), 1024)
+        self.assertEqual(ch.parse_memory_mb("64 MB"), 64)
+        self.assertIsNone(ch.parse_memory_mb("N/A"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
