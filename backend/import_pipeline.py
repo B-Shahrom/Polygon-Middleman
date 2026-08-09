@@ -332,9 +332,20 @@ async def run_import_pipeline(parsed: Dict, opts: Dict, api_key: str, api_secret
         await step(f"Setting standard checker {std_id}...", set_std_checker)
     elif parsed["checkerCode"]:
         async def save_checker():
-            await api.call("problem.saveFile",
-                           {"problemId": pid, "type": "source", "name": "checker.cpp", "sourceType": opts["checkerType"]},
-                           _cpp_file("checker.cpp", parsed["checkerCode"]))
+            try:
+                await api.call("problem.saveFile",
+                               {"problemId": pid, "type": "source", "name": "checker.cpp", "sourceType": opts["checkerType"]},
+                               _cpp_file("checker.cpp", parsed["checkerCode"]))
+            except Exception as e:
+                # problem.saveFile has had Polygon-side 503 incidents that leave
+                # saveSolution / setChecker working — so a custom checker is stuck
+                # while a STANDARD one (set by name) would import. Make that actionable.
+                if "503" in str(e) or "unavailable" in str(e).lower():
+                    raise RuntimeError(
+                        f"{e} — Polygon's file-upload endpoint (saveFile) is down. A standard "
+                        "checker (declare it in characteristics.md/MANIFEST.json, e.g. 'ncmp (native)') "
+                        "is set by name and avoids saveFile; otherwise retry when Polygon recovers.")
+                raise
             await api.call("problem.setChecker", {"problemId": pid, "checker": "checker.cpp"})
             return "Checker uploaded & set"
         await step("Uploading checker.cpp...", save_checker)
