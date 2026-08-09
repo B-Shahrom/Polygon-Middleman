@@ -718,6 +718,26 @@ def _import_defaults() -> dict:
     return s
 
 
+def _resolve_preview(mlim: Optional[dict], clim: Optional[dict], settings: dict) -> dict:
+    """The effective limits + checker an import WOULD apply from a manifest and/or
+    characteristics, absent an explicit form field: limits manifest > characteristics
+    > default; checker manifest > characteristics (null → upload the archive's
+    checker.cpp). Used by /api/parse to preview the decision."""
+    import manifest as mf
+    mlim, clim = mlim or {}, clim or {}
+    tl, tl_src = mf.resolve_limit_chain(
+        [(mlim.get("timeLimit"), "manifest"), (clim.get("timeLimit"), "characteristics")],
+        settings["default_time_limit"])
+    ml, ml_src = mf.resolve_limit_chain(
+        [(mlim.get("memoryLimit"), "manifest"), (clim.get("memoryLimit"), "characteristics")],
+        settings["default_memory_limit"])
+    return {
+        "timeLimit": tl, "memoryLimit": ml,
+        "limitsSource": tl_src if tl_src == ml_src else "mixed",
+        "checker": mlim.get("checker") or clim.get("checker"),   # {kind,name,polygonId}|None
+    }
+
+
 async def _packages(problemId: int) -> list:
     api_key, api_secret = get_creds()
     body, _ = await call_polygon("problem.packages", api_key, api_secret, {"problemId": problemId})
@@ -747,10 +767,13 @@ async def parse_archives(files: List[UploadFile] = File(...)):
     import zip_parser as zp
     from statement_parser import iso_639_1
     import manifest as mf
+    import characteristics as ch
 
+    settings = _import_defaults()
     try:
-        # An optional MANIFEST.json may travel with the archives; separate it out.
+        # Optional MANIFEST.json / characteristics.md may travel with the archives.
         manifest = None
+        chars: dict = {}       # slug -> {timeLimit, memoryLimit, checker}
         archives = []          # (filename, content)
         parse_errors = []
         for f in files:
@@ -760,6 +783,12 @@ async def parse_archives(files: List[UploadFile] = File(...)):
                     manifest = mf.parse_manifest(content)
                 except mf.ManifestError as e:
                     parse_errors.append({"file": f.filename, "error": f"manifest: {e}"})
+                continue
+            if ch.looks_like_characteristics(f.filename, content):
+                try:
+                    chars = ch.derive_from_characteristics(content.decode("utf-8", errors="replace"))
+                except Exception as e:
+                    parse_errors.append({"file": f.filename, "error": f"characteristics: {e}"})
                 continue
             archives.append((f.filename, content))
 
@@ -823,6 +852,12 @@ async def parse_archives(files: List[UploadFile] = File(...)):
                     "measuredWorstMs": mlim["measuredWorstMs"],
                     "archiveVerified": archive_verified,
                 } if mlim else None),
+                # Present only when a characteristics.md describes this slug.
+                "characteristics": chars.get(slug),
+                # The effective decision the import WOULD make (no form field here):
+                # limits manifest > characteristics > default; checker manifest >
+                # characteristics; `checker` null → upload the archive's checker.cpp.
+                "resolved": _resolve_preview(mlim, chars.get(slug), settings),
             })
     except Exception as e:
         import traceback
@@ -855,6 +890,7 @@ async def import_problem(
     import zip_parser as zp
     import import_jobs
     import manifest as mf
+    import characteristics as ch
 
     api_key, api_secret = get_creds()
     settings = _import_defaults()
@@ -870,8 +906,9 @@ async def import_problem(
     # would give Maestro an opaque error. Any crash is logged with a full traceback
     # to the activity log and returned as a readable 500 detail.
     try:
-        # An optional MANIFEST.json may travel with the archives; separate it out.
+        # Optional MANIFEST.json / characteristics.md may travel with the archives.
         manifest = None
+        chars: dict = {}       # slug -> {timeLimit, memoryLimit, checker}
         archives = []          # (filename, content)
         parse_errors = []
         for f in files:
@@ -882,6 +919,13 @@ async def import_problem(
                 except mf.ManifestError as e:
                     parse_errors.append({"file": f.filename, "error": f"manifest: {e}"})
                     alog.record("error", "import", f"manifest parse failed: {f.filename} — {e}")
+                continue
+            if ch.looks_like_characteristics(f.filename, content):
+                try:
+                    chars = ch.derive_from_characteristics(content.decode("utf-8", errors="replace"))
+                except Exception as e:
+                    parse_errors.append({"file": f.filename, "error": f"characteristics: {e}"})
+                    alog.record("error", "import", f"characteristics parse failed: {f.filename} — {e}")
                 continue
             archives.append((f.filename, content))
 
@@ -908,22 +952,31 @@ async def import_problem(
             grouped.setdefault(key, []).append(p)
         groups = [(slug, zp.merge_parsed_group(items)) for slug, items in grouped.items()]
 
-        # Resolve per-slug limits: explicit form field > manifest > server default.
-        # `limitsSource` (form|manifest|default|mixed) travels on the job so a
-        # manifest fallback can never be mistaken for an explicit value.
+        # Resolve per-slug limits: form field > manifest > characteristics > default.
+        # `limitsSource` (form|manifest|characteristics|default|mixed) travels on the
+        # job so a fallback can never be mistaken for an explicit value. The checker
+        # directive (manifest > characteristics) tells the pipeline to set a STANDARD
+        # checker by name instead of uploading the archive's checker.cpp.
         d_tl, d_ml = settings["default_time_limit"], settings["default_memory_limit"]
         limits_by_slug: dict = {}
+        checker_by_slug: dict = {}
         for slug, _merged in groups:
             mlim = mf.limits_for(manifest, slug) or {}
-            tl, tl_src = mf.resolve_limit(timeLimit, mlim.get("timeLimit"), d_tl)
-            ml, ml_src = mf.resolve_limit(memoryLimit, mlim.get("memoryLimit"), d_ml)
+            clim = chars.get(slug) or {}
+            tl, tl_src = mf.resolve_limit_chain(
+                [(timeLimit, "form"), (mlim.get("timeLimit"), "manifest"), (clim.get("timeLimit"), "characteristics")], d_tl)
+            ml, ml_src = mf.resolve_limit_chain(
+                [(memoryLimit, "form"), (mlim.get("memoryLimit"), "manifest"), (clim.get("memoryLimit"), "characteristics")], d_ml)
             limits_by_slug[slug] = {
                 "timeLimit": tl, "memoryLimit": ml,
                 "source": tl_src if tl_src == ml_src else "mixed",
             }
+            directive = mlim.get("checker") or clim.get("checker")
+            if directive:
+                checker_by_slug[slug] = directive
 
         job = import_jobs.create_job(groups, opts_common, parse_errors, api_key, api_secret,
-                                     limits_by_slug=limits_by_slug)
+                                     limits_by_slug=limits_by_slug, checker_by_slug=checker_by_slug)
     except Exception as e:
         import traceback
         tb = traceback.format_exc()

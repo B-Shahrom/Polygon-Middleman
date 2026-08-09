@@ -314,6 +314,21 @@ class TestPipeline(unittest.TestCase):
         self.assertEqual(res["problemId"], 777)                # resolved via problems.list
         self.assertIn("problems.list", fake.calls)
 
+    def test_standard_checker_directive_skips_upload(self):
+        # A standard-checker directive sets it by name (setChecker) and does NOT
+        # upload — which also sidesteps the 503-prone saveFile.
+        opts = {**OPTS, "checker": {"kind": "standard", "name": "ncmp", "polygonId": "std::ncmp.cpp"}}
+        res, fake = self._run(zp.parse_zip(make_zip()), opts=opts)
+        self.assertTrue(res["ok"])
+        self.assertIn("problem.setChecker", fake.calls)
+        self.assertNotIn("problem.saveFile", fake.calls)       # no checker.cpp upload
+
+    def test_custom_checker_directive_uploads_from_archive(self):
+        opts = {**OPTS, "checker": {"kind": "custom", "name": None, "polygonId": None}}
+        res, fake = self._run(zp.parse_zip(make_zip()), opts=opts)
+        self.assertTrue(res["ok"])
+        self.assertIn("problem.saveFile", fake.calls)          # custom → upload the archive's checker
+
 
 # ── job_store persistence ─────────────────────────────────────────────────────
 
@@ -358,7 +373,7 @@ OPTS_COMMON = {"timeLimit": 1000, "memoryLimit": 256, "onExists": "fill",
 
 def make_manifest(slug="edu-demo-problem", archive_bytes=None, *,
                   time_limit_s=2, memory_limit_mb=512, measured_worst_s=0.05,
-                  schema_version="1.0") -> bytes:
+                  schema_version="1.0", checker=None) -> bytes:
     entry = {
         "idx": 1, "slug": slug,
         "archive": {
@@ -367,6 +382,7 @@ def make_manifest(slug="edu-demo-problem", archive_bytes=None, *,
             "bytes": len(archive_bytes) if archive_bytes is not None else 0,
         },
         "tests_archive": None,
+        "checker": checker,
         "limits": {"time_limit_s": time_limit_s, "memory_limit_mb": memory_limit_mb,
                    "measured_worst_s": measured_worst_s},
     }
@@ -410,6 +426,22 @@ class TestManifestModule(unittest.TestCase):
         self.assertEqual(mf.resolve_limit(2000, 1500, 1000), (2000, "form"))     # form wins
         self.assertEqual(mf.resolve_limit(None, 1500, 1000), (1500, "manifest")) # then manifest
         self.assertEqual(mf.resolve_limit(None, None, 1000), (1000, "default"))  # then default
+
+    def test_resolve_limit_chain_form_manifest_characteristics_default(self):
+        chain = lambda f, m, c: mf.resolve_limit_chain(
+            [(f, "form"), (m, "manifest"), (c, "characteristics")], 1000)
+        self.assertEqual(chain(3000, 2000, 1500), (3000, "form"))
+        self.assertEqual(chain(None, 2000, 1500), (2000, "manifest"))
+        self.assertEqual(chain(None, None, 1500), (1500, "characteristics"))
+        self.assertEqual(chain(None, None, None), (1000, "default"))
+
+    def test_manifest_checker_normalized(self):
+        m = mf.parse_manifest(make_manifest(
+            checker={"kind": "native", "name": "ncmp", "polygon_id": "std::ncmp.cpp"}))
+        self.assertEqual(mf.checker_for(m, "edu-demo-problem"),
+                         {"kind": "standard", "name": "ncmp", "polygonId": "std::ncmp.cpp"})
+        m2 = mf.parse_manifest(make_manifest(checker={"kind": "custom", "name": None}))
+        self.assertEqual(mf.checker_for(m2, "edu-demo-problem")["kind"], "custom")
 
 
 class TestManifestIntegration(unittest.TestCase):
@@ -478,6 +510,21 @@ class TestCharacteristics(unittest.TestCase):
         lim = ch.derive_limits_from_characteristics(CHARACTERISTICS_SAMPLE)
         self.assertNotIn("edu-FAKE", lim)          # the code-fence example must not leak in
         self.assertEqual(len(lim), 5)              # exactly the 5 General-table rows
+
+    def test_parse_checker(self):
+        self.assertEqual(ch.parse_checker("ncmp (native)"),
+                         {"kind": "standard", "name": "ncmp", "polygonId": "std::ncmp.cpp"})
+        self.assertEqual(ch.parse_checker("wcmp (native)")["polygonId"], "std::wcmp.cpp")
+        self.assertEqual(ch.parse_checker("custom"),
+                         {"kind": "custom", "name": None, "polygonId": None})
+        self.assertIsNone(ch.parse_checker("N/A"))
+        self.assertIsNone(ch.parse_checker(""))
+
+    def test_derive_includes_checker(self):
+        d = ch.derive_from_characteristics(CHARACTERISTICS_SAMPLE)
+        self.assertEqual(d["edu-a-school-bag"]["checker"]["kind"], "standard")   # "ncmp (native)"
+        self.assertEqual(d["edu-a-school-bag"]["checker"]["polygonId"], "std::ncmp.cpp")
+        self.assertEqual(d["edu-a-dnc-restore"]["checker"]["kind"], "custom")    # "custom"
 
     def test_unit_parsers(self):
         self.assertEqual(ch.parse_time_ms("1 s"), 1000)

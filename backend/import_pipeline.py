@@ -320,8 +320,17 @@ async def run_import_pipeline(parsed: Dict, opts: Dict, api_key: str, api_secret
             return f"Statements saved: {', '.join(langs)}{tut_note}"
         await step(f"Saving statements for {len(langs)} language(s)...", save_statements)
 
-    # 4. Checker
-    if parsed["checkerCode"]:
+    # 4. Checker. A manifest/characteristics directive can select a STANDARD testlib
+    # checker, set by name with NO file upload (which also sidesteps the 503-prone
+    # saveFile). Otherwise the bespoke checker.cpp from the archive is uploaded.
+    checker = opts.get("checker") or {}
+    if checker.get("kind") == "standard" and checker.get("polygonId"):
+        std_id = checker["polygonId"]
+        async def set_std_checker():
+            await api.call("problem.setChecker", {"problemId": pid, "checker": std_id})
+            return f"Standard checker set: {std_id} (no upload)"
+        await step(f"Setting standard checker {std_id}...", set_std_checker)
+    elif parsed["checkerCode"]:
         async def save_checker():
             await api.call("problem.saveFile",
                            {"problemId": pid, "type": "source", "name": "checker.cpp", "sourceType": opts["checkerType"]},

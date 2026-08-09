@@ -60,6 +60,19 @@ def parse_manifest(content: bytes) -> Dict:
     def _ms(seconds) -> Optional[int]:
         return int(round(seconds * 1000)) if isinstance(seconds, (int, float)) else None
 
+    def _norm_checker(chk) -> Optional[dict]:
+        # Manifest checker: {kind: native|custom, name, polygon_id}. Normalize to the
+        # same shape characteristics.py uses: native → standard (+ polygonId).
+        if not isinstance(chk, dict):
+            return None
+        kind = (chk.get("kind") or "").lower()
+        if kind in ("native", "standard"):
+            pid = chk.get("polygon_id") or (f"std::{chk.get('name')}.cpp" if chk.get("name") else None)
+            return {"kind": "standard", "name": chk.get("name"), "polygonId": pid}
+        if kind == "custom":
+            return {"kind": "custom", "name": None, "polygonId": None}
+        return None
+
     problems: Dict[str, dict] = {}
     by_filename: Dict[str, dict] = {}
     for p in data.get("problems", []) or []:
@@ -72,6 +85,7 @@ def parse_manifest(content: bytes) -> Dict:
             "timeLimit": _ms(lim.get("time_limit_s")),          # ms, to match the API
             "memoryLimit": lim.get("memory_limit_mb"),           # MB
             "measuredWorstMs": _ms(lim.get("measured_worst_s")),
+            "checker": _norm_checker(p.get("checker")),          # {kind,name,polygonId}|None
         }
         problems[slug] = entry
         # archive + optional tests pack → filename -> integrity record
@@ -114,11 +128,17 @@ def archive_verified(manifest: Optional[Dict], filename: Optional[str], content:
 
 
 def limits_for(manifest: Optional[Dict], slug: str) -> Optional[dict]:
-    """The manifest's per-slug limit entry ({timeLimit, memoryLimit, measuredWorstMs}),
+    """The manifest's per-slug entry ({timeLimit, memoryLimit, measuredWorstMs, checker}),
     or None if there's no manifest or it doesn't describe this slug."""
     if not manifest:
         return None
     return manifest["problems"].get(slug)
+
+
+def checker_for(manifest: Optional[Dict], slug: str) -> Optional[dict]:
+    """The manifest's per-slug checker directive ({kind,name,polygonId}) or None."""
+    entry = limits_for(manifest, slug)
+    return entry.get("checker") if entry else None
 
 
 def resolve_limit(form_val: Optional[int], manifest_val: Optional[int], default_val: int):
@@ -128,4 +148,14 @@ def resolve_limit(form_val: Optional[int], manifest_val: Optional[int], default_
         return form_val, "form"
     if manifest_val is not None:
         return manifest_val, "manifest"
+    return default_val, "default"
+
+
+def resolve_limit_chain(candidates, default_val):
+    """Generalized precedence: `candidates` is an ordered list of (value, source);
+    the first non-None value wins, else `default_val` with source 'default'. Used to
+    resolve form > manifest > characteristics > default."""
+    for value, source in candidates:
+        if value is not None:
+            return value, source
     return default_val, "default"

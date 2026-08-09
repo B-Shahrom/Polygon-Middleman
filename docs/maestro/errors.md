@@ -87,12 +87,27 @@ Fetched **live** from Polygon on each `GET /api/verify-status/{jobId}` (`import_
   — that closes the loop instead of sending-and-hoping. (It's the value the middleman sent, not
   a re-read from Polygon; with `errorCode: IMPORTED` the `updateInfo` call returned OK.)
 - **Know WHERE the limit came from:** `verify-status.problems[].limitsSource` ∈
-  `form | manifest | default | mixed`. `form` = an explicit `timeLimit`/`memoryLimit` field;
-  `manifest` = taken from an uploaded `MANIFEST.json` (below); `default` = the server default;
-  `mixed` = the two dimensions came from different sources (e.g. `timeLimit` from a form field,
-  `memoryLimit` from the manifest). Precedence is always **form > manifest > default**. This
-  exists so a manifest fallback (usually right) can never be silently mistaken for an explicit
-  value — assert the source, not just the number.
+  `form | manifest | characteristics | default | mixed`. `form` = an explicit
+  `timeLimit`/`memoryLimit` field; `manifest` = an uploaded `MANIFEST.json`; `characteristics`
+  = an uploaded `characteristics.md`; `default` = the server default; `mixed` = the two
+  dimensions came from different sources. Precedence is always
+  **form > manifest > characteristics > default**. This exists so a fallback (usually right)
+  can never be silently mistaken for an explicit value — assert the source, not just the number.
+
+### Optional `characteristics.md` travelling with the archives
+
+Upload it as one of the multipart `files` (named `characteristics.md`, or markdown with a
+Characteristics heading + General table). Optional; a second authored source of the same facts.
+
+- **Limits.** The General table's per-slug `TL`/`ML` (normalized: `2 s`→2000 ms, `64 MB`→64) feed
+  the limit precedence at the `characteristics` tier (below `manifest`, above `default`).
+- **Checker.** The `checker` column drives the checker step: `ncmp (native)` sets the **standard**
+  testlib checker by name (`setChecker std::ncmp.cpp`, **no upload** — which also sidesteps the
+  503-prone `saveFile`); `custom` uploads the archive's `checker.cpp`. `verify-status` reports
+  `checkerKind` (`standard` | `null`). Manifest checker wins over characteristics when both exist.
+- **`/api/parse`** surfaces a per-problem `characteristics` object `{timeLimit, memoryLimit,
+  checker}` and a `resolved` object `{timeLimit, memoryLimit, limitsSource, checker}` — the
+  effective decision an import would make (absent a form field), so a caller can preview it.
 
 ### Optional `MANIFEST.json` (set descriptor) travelling with the archives
 

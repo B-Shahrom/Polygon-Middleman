@@ -22,9 +22,12 @@ from __future__ import annotations
 import re
 from typing import Dict, List, Optional
 
-# Header aliases → the two limit dimensions (all matched case-insensitively).
+# Header aliases → columns of interest (all matched case-insensitively).
 _TL_HEADERS = ("tl", "time", "time limit", "timelimit")
 _ML_HEADERS = ("ml", "memory", "memory limit", "memorylimit")
+_CHECKER_HEADERS = ("checker", "check")
+
+_NATIVE_RE = re.compile(r"^([a-z0-9_]+)\s*\(native\)", re.I)
 
 
 def _split_row(line: str) -> List[str]:
@@ -37,6 +40,23 @@ def _is_separator(line: str) -> bool:
         return False
     cells = _split_row(line)
     return bool(cells) and all(re.fullmatch(r":?-{1,}:?", c) for c in cells)
+
+
+def looks_like_characteristics(filename: Optional[str], content: bytes) -> bool:
+    """A file is a characteristics.md if it's named characteristics.md, or (fallback)
+    it is text with a Characteristics heading and a parseable General table. ZIPs
+    (start with 'PK') are never characteristics."""
+    base = (filename or "").rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
+    if base in ("characteristics.md", "characteristics.markdown"):
+        return True
+    if content[:2] == b"PK":
+        return False
+    try:
+        text = content.decode("utf-8", errors="strict")
+    except Exception:
+        return False
+    low = text.lower()
+    return ("# characteristics" in low or "## general" in low) and bool(parse_general_table(text))
 
 
 def parse_general_table(md_text: str) -> List[Dict[str, str]]:
@@ -115,12 +135,32 @@ def parse_memory_mb(value: Optional[str]) -> Optional[int]:
     return int(round(mb))
 
 
-def derive_limits_from_characteristics(md_text: str) -> Dict[str, Dict[str, Optional[int]]]:
-    """Per-slug limits from a characteristics.md, one entry per General-table row:
-    `{slug: {"timeLimit": <ms|None>, "memoryLimit": <mb|None>}}`. Units are
-    normalized (TL seconds → ms, ML → MB) to match `MANIFEST.json`. Rows without a
-    slug are skipped; a missing/`N/A` TL or ML gives `None` for that dimension."""
-    out: Dict[str, Dict[str, Optional[int]]] = {}
+def parse_checker(value: Optional[str]) -> Optional[Dict]:
+    """Parse a characteristics `checker` cell into a directive.
+      'ncmp (native)' → {kind: standard, name: ncmp, polygonId: std::ncmp.cpp}
+      'custom'        → {kind: custom, name: None, polygonId: None}
+      blank / 'N/A'   → None (unknown — fall back to the archive's checker.cpp).
+    A standard checker is set on Polygon by name (`setChecker std::<name>.cpp`) with
+    no file upload; `custom` means the bespoke checker.cpp in the archive is used."""
+    v = (value or "").strip()
+    if not v or "n/a" in v.lower():
+        return None
+    low = v.lower()
+    if "custom" in low:
+        return {"kind": "custom", "name": None, "polygonId": None}
+    m = _NATIVE_RE.match(low) or re.match(r"^([a-z0-9_]+)", low)
+    if m:
+        name = m.group(1)
+        return {"kind": "standard", "name": name, "polygonId": f"std::{name}.cpp"}
+    return None
+
+
+def derive_from_characteristics(md_text: str) -> Dict[str, Dict]:
+    """Per-slug limits AND checker directive from a characteristics.md, one entry per
+    General-table row: `{slug: {"timeLimit": <ms|None>, "memoryLimit": <mb|None>,
+    "checker": {kind,name,polygonId}|None}}`. Units normalized to match MANIFEST.json.
+    Rows without a slug are skipped; a missing/`N/A` cell gives `None`."""
+    out: Dict[str, Dict] = {}
     for row in parse_general_table(md_text):
         slug = (row.get("slug") or "").strip()
         if not slug:
@@ -128,5 +168,13 @@ def derive_limits_from_characteristics(md_text: str) -> Dict[str, Dict[str, Opti
         out[slug] = {
             "timeLimit": parse_time_ms(_first(row, _TL_HEADERS)),
             "memoryLimit": parse_memory_mb(_first(row, _ML_HEADERS)),
+            "checker": parse_checker(_first(row, _CHECKER_HEADERS)),
         }
     return out
+
+
+def derive_limits_from_characteristics(md_text: str) -> Dict[str, Dict[str, Optional[int]]]:
+    """Limits-only view of `derive_from_characteristics` —
+    `{slug: {"timeLimit": <ms|None>, "memoryLimit": <mb|None>}}`."""
+    return {slug: {"timeLimit": v["timeLimit"], "memoryLimit": v["memoryLimit"]}
+            for slug, v in derive_from_characteristics(md_text).items()}
