@@ -46,13 +46,18 @@ class _Api:
         self._key = api_key
         self._secret = api_secret
 
-    async def call(self, method: str, params: dict, files: Optional[dict] = None, retries: int = 3):
-        """Call Polygon, retrying TRANSIENT failures (a non-JSON HTML error page,
-        or a transport error) with backoff — Polygon intermittently returns HTML
-        instead of JSON, and one blip on e.g. saveFile shouldn't fail a whole
-        import. A real Polygon `FAILED` (valid JSON) is a genuine error and is NOT
-        retried. saveTest/saveFile/saveStatement are idempotent overwrites, so a
-        retry is safe."""
+    async def call(self, method: str, params: dict, files: Optional[dict] = None, retries: int = 6):
+        """Call Polygon, retrying TRANSIENT failures with EXPONENTIAL backoff.
+
+        Polygon's front intermittently returns an HTML error page instead of JSON —
+        typically a `503 Service Temporarily Unavailable` under load — and it tends
+        to land on the first file upload of a problem (the checker), so a single blip
+        must not fail a whole import. The old 3-try / ~4.5s budget gave up while the
+        503 window was still open; this rides over a longer one (~50s across 6 tries,
+        2/4/8/16/20s) and logs each retry so the blip is visible, not silent.
+
+        A real Polygon `FAILED` (valid JSON) is a genuine error and is NOT retried.
+        saveTest/saveFile/saveStatement are idempotent overwrites, so a retry is safe."""
         last = ""
         for attempt in range(retries):
             text = ""
@@ -60,8 +65,10 @@ class _Api:
                 body, _ = await call_polygon(method, self._key, self._secret, params, files)
                 text = body.decode("utf-8", errors="replace")
                 data = json.loads(text)
-            except json.JSONDecodeError:
-                last = f"non-JSON response ({text[:120]})"      # Polygon returned an HTML page — transient
+            except json.JSONDecodeError:                         # HTML error page — transient
+                snippet = " ".join(text.split())[:100]
+                is_503 = ("503" in text) or ("502" in text) or ("Unavailable" in text)
+                last = f"{'Polygon 503/unavailable' if is_503 else 'non-JSON'} response ({snippet})"
             except Exception as e:                               # network / transport — transient
                 last = f"transport error: {e}"
             else:
@@ -69,7 +76,10 @@ class _Api:
                     raise RuntimeError(data.get("comment", f"{method} failed"))
                 return data.get("result")
             if attempt < retries - 1:
-                await asyncio.sleep(1.5 * (attempt + 1))
+                delay = min(2.0 * (2 ** attempt), 20.0)          # 2,4,8,16,20 → ~50s total
+                alog.record("warn", "import",
+                            f"{method}: {last} — retrying (attempt {attempt + 2}/{retries}) in {int(delay)}s")
+                await asyncio.sleep(delay)
         raise RuntimeError(f"{method}: {last} (after {retries} attempts)")
 
 

@@ -248,7 +248,17 @@ class TestApiRetry(unittest.TestCase):
             api = _Api("k", "s")
             with self.assertRaises(RuntimeError):
                 run(api.call("problem.tests", {"problemId": 1}))
-        self.assertEqual(fake.calls.count("problem.tests"), 3)         # capped at `retries`
+        self.assertEqual(fake.calls.count("problem.tests"), 6)         # capped at `retries` (default 6)
+
+    def test_503_html_is_retried(self):
+        # A 503 "Service Temporarily Unavailable" page (the checker-upload symptom)
+        # is transient and retried, not surfaced as a genuine failure.
+        fake = FakePolygon()
+        fake.transient["problem.saveFile"] = 3        # three 503s, then OK
+        with FakeTransport(fake):
+            api = _Api("k", "s")
+            run(api.call("problem.saveFile", {"problemId": 1}))
+        self.assertEqual(fake.calls.count("problem.saveFile"), 4)      # 3 retries + success
 
 
 # ── Pipeline (fake transport) ─────────────────────────────────────────────────
