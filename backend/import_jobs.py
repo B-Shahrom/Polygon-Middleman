@@ -28,6 +28,31 @@ import job_store
 
 _JOBS: Dict[str, dict] = {}
 _SLUG_LOCKS: Dict[str, asyncio.Lock] = {}
+# Live background tasks, so a job can be cancelled mid-flight. NOT persisted (a Task
+# isn't serializable and doesn't survive a restart anyway).
+_TASKS: Dict[str, "asyncio.Task"] = {}
+
+
+def cancel_job(job_id: str) -> bool:
+    """Cancel a running job's background task. Returns True if there was a live task
+    to cancel. The task's CancelledError handler marks the unfinished problems
+    'cancelled' and persists — nothing is committed to Polygon, so a later re-import
+    (fill) is clean."""
+    task = _TASKS.get(job_id)
+    if task is not None and not task.done():
+        task.cancel()
+        return True
+    return False
+
+
+def cancel_all() -> int:
+    """Cancel every running import task. Returns how many were cancelled."""
+    n = 0
+    for jid, task in list(_TASKS.items()):
+        if task is not None and not task.done():
+            task.cancel()
+            n += 1
+    return n
 
 
 def _persist(job: dict) -> None:
@@ -143,8 +168,10 @@ def create_job(groups: List[Tuple[str, dict]], opts_common: dict, parse_errors: 
     }
     _JOBS[job_id] = job
     _persist(job)
-    asyncio.create_task(_run_job(job, groups, opts_common, api_key, api_secret,
-                                 limits_by_slug, checker_by_slug))
+    task = asyncio.create_task(_run_job(job, groups, opts_common, api_key, api_secret,
+                                        limits_by_slug, checker_by_slug))
+    _TASKS[job_id] = task
+    task.add_done_callback(lambda _t, jid=job_id: _TASKS.pop(jid, None))
     return job
 
 
@@ -152,43 +179,54 @@ async def _run_job(job: dict, groups, opts_common: dict, api_key: str, api_secre
                    limits_by_slug: Optional[dict] = None, checker_by_slug: Optional[dict] = None):
     limits_by_slug = limits_by_slug or {}
     checker_by_slug = checker_by_slug or {}
-    for (slug, merged), prob in zip(groups, job["problems"]):
-        prob["importState"] = "running"
-        async with _slug_lock(slug):  # serialize same-slug across all jobs
-            # Per-slug limits (form>manifest>characteristics>default, resolved upstream)
-            # override the request-level fallback; a checker directive selects a
-            # standard checker instead of uploading the archive's checker.cpp.
-            lim = limits_by_slug.get(slug, {})
-            opts = {**opts_common, "slug": slug}
-            if "timeLimit" in lim:
-                opts["timeLimit"] = lim["timeLimit"]
-            if "memoryLimit" in lim:
-                opts["memoryLimit"] = lim["memoryLimit"]
-            if slug in checker_by_slug:
-                opts["checker"] = checker_by_slug[slug]
-            try:
-                # Pass the problem's own log list as the sink so steps stream into
-                # the job record live (verify-status reads it), not only at the end.
-                res = await run_import_pipeline(merged, opts, api_key, api_secret,
-                                                log_sink=prob["log"])
-            except Exception as e:  # pragma: no cover — pipeline is defensive, but never crash the job
-                prob["log"].append({"text": f"Import crashed: {e}", "status": "error"})
-                prob.update(importState="failed", errors=1, errorCode="STEP_FAILED",
-                            clientAction="retry")
-                _persist(job)
-                continue
-            prob.update(
-                problemId=res.get("problemId"),
-                errors=res.get("errors", 0),
-                verifyRequested=res.get("verifyRequested", False),
-                alreadyVerified=res.get("alreadyVerified", False),
-                errorCode=res.get("errorCode"),
-                clientAction=res.get("clientAction"),
-                appliedTimeLimit=res.get("appliedTimeLimit"),
-                appliedMemoryLimit=res.get("appliedMemoryLimit"),
-                importState="imported" if (res.get("ok") or res.get("alreadyVerified")) else "failed",
-            )
-            _persist(job)  # checkpoint each problem's terminal state (survives restart)
+    try:
+        for (slug, merged), prob in zip(groups, job["problems"]):
+            prob["importState"] = "running"
+            async with _slug_lock(slug):  # serialize same-slug across all jobs
+                # Per-slug limits (form>manifest>characteristics>default, resolved upstream)
+                # override the request-level fallback; a checker directive selects a
+                # standard checker instead of uploading the archive's checker.cpp.
+                lim = limits_by_slug.get(slug, {})
+                opts = {**opts_common, "slug": slug}
+                if "timeLimit" in lim:
+                    opts["timeLimit"] = lim["timeLimit"]
+                if "memoryLimit" in lim:
+                    opts["memoryLimit"] = lim["memoryLimit"]
+                if slug in checker_by_slug:
+                    opts["checker"] = checker_by_slug[slug]
+                try:
+                    # Pass the problem's own log list as the sink so steps stream into
+                    # the job record live (verify-status reads it), not only at the end.
+                    res = await run_import_pipeline(merged, opts, api_key, api_secret,
+                                                    log_sink=prob["log"])
+                except Exception as e:  # pragma: no cover — pipeline is defensive, but never crash the job
+                    prob["log"].append({"text": f"Import crashed: {e}", "status": "error"})
+                    prob.update(importState="failed", errors=1, errorCode="STEP_FAILED",
+                                clientAction="retry")
+                    _persist(job)
+                    continue
+                prob.update(
+                    problemId=res.get("problemId"),
+                    errors=res.get("errors", 0),
+                    verifyRequested=res.get("verifyRequested", False),
+                    alreadyVerified=res.get("alreadyVerified", False),
+                    errorCode=res.get("errorCode"),
+                    clientAction=res.get("clientAction"),
+                    appliedTimeLimit=res.get("appliedTimeLimit"),
+                    appliedMemoryLimit=res.get("appliedMemoryLimit"),
+                    importState="imported" if (res.get("ok") or res.get("alreadyVerified")) else "failed",
+                )
+                _persist(job)  # checkpoint each problem's terminal state (survives restart)
+    except asyncio.CancelledError:
+        # Stop requested mid-flight. Mark whatever hadn't finished as cancelled; nothing
+        # was committed to Polygon, so a later re-import (fill) is clean.
+        for prob in job["problems"]:
+            if prob["importState"] in ("queued", "running"):
+                prob.update(importState="cancelled", errorCode="CANCELLED", clientAction="halt")
+                prob["log"].append({"text": "Cancelled by user", "status": "error"})
+        job["state"] = "cancelled"
+        _persist(job)
+        raise
     job["state"] = "failed" if any(p["importState"] == "failed" for p in job["problems"]) else "done"
     _persist(job)
 

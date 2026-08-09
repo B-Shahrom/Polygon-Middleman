@@ -1863,6 +1863,61 @@
         }
       }
     },
+    "/api/import-cancel/{jobId}": {
+      "post": {
+        "summary": "Import Cancel",
+        "description": "Stop a running import mid-flight. The background task is cancelled at its next\nawait (including during a retry backoff or a Polygon upload), and whatever hadn't\nfinished is marked `cancelled` (errorCode `CANCELLED`). Nothing is committed to\nPolygon, so a later re-import (fill) is clean. `404` if the job is unknown.",
+        "operationId": "import_cancel_api_import_cancel__jobId__post",
+        "parameters": [
+          {
+            "name": "jobId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Jobid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/import-cancel-all": {
+      "post": {
+        "summary": "Import Cancel All",
+        "description": "Stop every running import at once (a global Stop). Returns how many live jobs\nwere cancelled.",
+        "operationId": "import_cancel_all_api_import_cancel_all_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/download-package/{jobId}": {
       "get": {
         "summary": "Download Package",

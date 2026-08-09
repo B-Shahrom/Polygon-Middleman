@@ -538,5 +538,39 @@ class TestCharacteristics(unittest.TestCase):
         self.assertIsNone(ch.parse_memory_mb("N/A"))
 
 
+class TestCancel(unittest.TestCase):
+    def test_cancel_marks_job_cancelled_midflight(self):
+        async def go():
+            saved_persist = import_jobs._persist
+            saved_call = import_pipeline.call_polygon
+            import_jobs._persist = lambda job: None
+            started = asyncio.Event()
+            async def hanging(method, k, s, params=None, files=None):
+                started.set()
+                await asyncio.sleep(3600)      # block until cancelled
+            import_pipeline.call_polygon = hanging
+            try:
+                job = import_jobs.create_job([("edu-demo-problem", zp.parse_zip(make_zip()))],
+                                             OPTS_COMMON, [], "k", "s")
+                await asyncio.wait_for(started.wait(), timeout=5)   # pipeline is mid-call
+                ok = import_jobs.cancel_job(job["jobId"])
+                for _ in range(100):           # let the CancelledError handler run
+                    await asyncio.sleep(0)
+                    if job["state"] == "cancelled":
+                        break
+                return ok, job
+            finally:
+                import_jobs._persist = saved_persist
+                import_pipeline.call_polygon = saved_call
+        ok, job = asyncio.run(go())
+        self.assertTrue(ok)
+        self.assertEqual(job["state"], "cancelled")
+        self.assertEqual(job["problems"][0]["importState"], "cancelled")
+        self.assertEqual(job["problems"][0]["errorCode"], "CANCELLED")
+
+    def test_cancel_unknown_or_done_returns_false(self):
+        self.assertFalse(import_jobs.cancel_job("no-such-job-id"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

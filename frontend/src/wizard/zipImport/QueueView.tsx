@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import {
-  Loader2, CheckCircle2, AlertCircle, X, ExternalLink, RotateCcw, ChevronRight, ChevronDown, Clock,
+  Loader2, CheckCircle2, AlertCircle, X, ExternalLink, RotateCcw, ChevronRight, ChevronDown, Clock, Ban,
 } from 'lucide-react';
 import { apiOriginCount, apiOriginsReady } from '../../api/client';
 import { ImportJob } from './types';
@@ -10,6 +10,7 @@ interface Props {
   concurrency: number;
   setConcurrency: (n: number) => void;
   onRetryJob: (id: string) => void;
+  onStopJob: (id: string) => void;
 }
 
 function StatusIcon({ status }: { status: ImportJob['status'] }) {
@@ -17,10 +18,11 @@ function StatusIcon({ status }: { status: ImportJob['status'] }) {
   if (status === 'running') return <Loader2 className="w-4 h-4 text-amber-400 animate-spin flex-shrink-0" />;
   if (status === 'done') return <CheckCircle2 className="w-4 h-4 text-green-400 flex-shrink-0" />;
   if (status === 'warnings') return <AlertCircle className="w-4 h-4 text-yellow-400 flex-shrink-0" />;
+  if (status === 'cancelled') return <Ban className="w-4 h-4 text-gray-500 flex-shrink-0" />;
   return <X className="w-4 h-4 text-red-400 flex-shrink-0" />;
 }
 
-export default function QueueView({ jobs, concurrency, setConcurrency, onRetryJob }: Props) {
+export default function QueueView({ jobs, concurrency, setConcurrency, onRetryJob, onStopJob }: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   // Shard probing resolves shortly after startup, so refresh once it settles.
   const [originCount, setOriginCount] = useState(apiOriginCount());
@@ -34,6 +36,7 @@ export default function QueueView({ jobs, concurrency, setConcurrency, onRetryJo
   const done = count('done');
   const warn = count('warnings');
   const failed = count('failed');
+  const cancelled = count('cancelled');
 
   return (
     <div className="space-y-3">
@@ -45,6 +48,7 @@ export default function QueueView({ jobs, concurrency, setConcurrency, onRetryJo
           {done > 0 && <span className="text-green-400">{done} done</span>}
           {warn > 0 && <span className="text-yellow-400">{warn} warnings</span>}
           {failed > 0 && <span className="text-red-400">{failed} failed</span>}
+          {cancelled > 0 && <span className="text-gray-500">{cancelled} cancelled</span>}
         </div>
         <label className="flex items-center gap-1.5 text-xs text-gray-500">
           Parallel agents
@@ -95,7 +99,12 @@ export default function QueueView({ jobs, concurrency, setConcurrency, onRetryJo
                   {job.status === 'running' && lastStep && (
                     <span className="text-xs text-gray-500 truncate max-w-[16rem] hidden sm:inline">{lastStep.text}</span>
                   )}
-                  {(job.status === 'failed' || job.status === 'warnings') && (
+                  {(job.status === 'running' || job.status === 'queued') && (
+                    <button onClick={() => onStopJob(job.id)} className="flex items-center gap-1 text-xs text-gray-500 hover:text-red-400" title="Stop this import">
+                      <Ban className="w-3.5 h-3.5" />Stop
+                    </button>
+                  )}
+                  {(job.status === 'failed' || job.status === 'warnings' || job.status === 'cancelled') && (
                     <button onClick={() => onRetryJob(job.id)} className="flex items-center gap-1 text-xs text-amber-400 hover:text-amber-300">
                       <RotateCcw className="w-3.5 h-3.5" />Retry
                     </button>

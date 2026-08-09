@@ -1007,6 +1007,30 @@ async def verify_status(jobId: str):
     return status
 
 
+@app.post("/api/import-cancel/{jobId}")
+async def import_cancel(jobId: str):
+    """Stop a running import mid-flight. The background task is cancelled at its next
+    await (including during a retry backoff or a Polygon upload), and whatever hadn't
+    finished is marked `cancelled` (errorCode `CANCELLED`). Nothing is committed to
+    Polygon, so a later re-import (fill) is clean. `404` if the job is unknown."""
+    import import_jobs
+    if import_jobs.get_job(jobId) is None:
+        raise HTTPException(status_code=404, detail=f"Unknown jobId: {jobId}")
+    cancelled = import_jobs.cancel_job(jobId)
+    alog.record("api", "import", f"cancel {jobId}: {'cancelled' if cancelled else 'nothing running'}")
+    return {"jobId": jobId, "cancelled": cancelled}
+
+
+@app.post("/api/import-cancel-all")
+async def import_cancel_all():
+    """Stop every running import at once (a global Stop). Returns how many live jobs
+    were cancelled."""
+    import import_jobs
+    n = import_jobs.cancel_all()
+    alog.record("api", "import", f"cancel-all: {n} job(s) cancelled")
+    return {"cancelled": n}
+
+
 @app.get("/api/download-package/{jobId}")
 async def download_package(jobId: str, problemId: Optional[int] = None, type: Optional[str] = None):
     """Download the latest READY package for a job's problem. If the job produced

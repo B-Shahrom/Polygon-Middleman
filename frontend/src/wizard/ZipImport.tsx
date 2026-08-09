@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Archive, Upload, Loader2, Copy, RotateCcw, History, Plus, Trash2, FileText, X } from 'lucide-react';
+import { Archive, Upload, Loader2, Copy, RotateCcw, History, Plus, Trash2, FileText, X, Ban } from 'lucide-react';
 import JSZip from 'jszip';
 import { api, AppSettings } from '../api/client';
 import { useApp } from '../context/AppContext';
@@ -67,7 +67,7 @@ export default function ZipImport({ open, onClose }: Props) {
     }]));
   }, []);
 
-  const { jobs, enqueue, retryJob, retryFailed, clearFinished, activeCount } = useImportQueue(concurrency, recordJob);
+  const { jobs, enqueue, retryJob, retryFailed, clearFinished, stopJob, stopAll, activeCount } = useImportQueue(concurrency, recordJob);
 
   // Desktop notification when the queue drains (active → idle). The error/warning
   // variant is silent (no sound) so it's noticeable but not annoying. Fires even
@@ -280,7 +280,8 @@ export default function ZipImport({ open, onClose }: Props) {
   const okCount = items.filter(i => i.parsed).length;
   const badCount = items.length - okCount;
   const importCount = items.filter(i => i.parsed && !i.skip).length;
-  const failedJobs = jobs.filter(j => j.status === 'failed' || j.status === 'warnings').length;
+  const failedJobs = jobs.filter(j => j.status === 'failed' || j.status === 'warnings' || j.status === 'cancelled').length;
+  const runningJobs = jobs.filter(j => j.status === 'queued' || j.status === 'running').length;
 
   return (
     <Modal
@@ -316,6 +317,11 @@ export default function ZipImport({ open, onClose }: Props) {
             {jobs.length > 0 && (
               <Button variant="ghost" icon={<Copy className="w-4 h-4" />} onClick={() => copySlugs(jobs.map(j => j.slug), 'from the queue')}>
                 Copy slugs
+              </Button>
+            )}
+            {runningJobs > 0 && (
+              <Button variant="ghost" icon={<Ban className="w-4 h-4" />} onClick={stopAll}>
+                Stop {runningJobs}
               </Button>
             )}
             {failedJobs > 0 && (
@@ -433,7 +439,7 @@ export default function ZipImport({ open, onClose }: Props) {
       )}
 
       {phase === 'queue' && (
-        <QueueView jobs={jobs} concurrency={concurrency} setConcurrency={setConcurrency} onRetryJob={retryJob} />
+        <QueueView jobs={jobs} concurrency={concurrency} setConcurrency={setConcurrency} onRetryJob={retryJob} onStopJob={stopJob} />
       )}
     </Modal>
   );

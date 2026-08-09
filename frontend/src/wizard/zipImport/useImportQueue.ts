@@ -27,9 +27,10 @@ export function useImportQueue(concurrency: number, onSettled: (job: ImportJob) 
   // Map a backend problem record onto a frontend job. The import "slot" is freed
   // as soon as the import finishes, even while the build/verify keeps running.
   const applyBackendProblem = (jobId: string, slug: string, prob: VerifyProblem) => {
-    const importDone = prob.importState === 'imported' || prob.importState === 'failed';
+    const importDone = prob.importState === 'imported' || prob.importState === 'failed' || prob.importState === 'cancelled';
     const status: JobStatus = !importDone
       ? 'running'
+      : prob.importState === 'cancelled' ? 'cancelled'
       : prob.importState === 'failed' ? 'failed' : prob.errors > 0 ? 'warnings' : 'done';
 
     let verifyStatus: VerifyStatus | undefined;
@@ -146,7 +147,7 @@ export function useImportQueue(concurrency: number, onSettled: (job: ImportJob) 
 
   const retryFailed = () => {
     setJobs((prev) => prev.map((j) => {
-      if (j.status !== 'failed' && j.status !== 'warnings') return j;
+      if (j.status !== 'failed' && j.status !== 'warnings' && j.status !== 'cancelled') return j;
       settled.current.delete(j.id);
       return resetJob(j);
     }));
@@ -155,7 +156,30 @@ export function useImportQueue(concurrency: number, onSettled: (job: ImportJob) 
   const clearFinished = () =>
     setJobs((prev) => prev.filter((j) => j.status === 'queued' || j.status === 'running'));
 
+  // Stop a single running job (cancel its backend task) or drop it if still queued.
+  const stopJob = (id: string) => {
+    const job = jobsRef.current.find((j) => j.id === id);
+    if (!job) return;
+    if (job.backendJobId) api.import.cancel(job.backendJobId).catch(() => {});
+    settled.current.add(id);
+    runningSlugs.current.delete(job.slug.toLowerCase());
+    patch(id, { status: 'cancelled', log: [...(job.log || []), { text: 'Cancelled by user', status: 'error' }] });
+  };
+
+  // Stop EVERYTHING in flight: cancel all backend tasks, drop queued jobs, and mark
+  // queued/running jobs cancelled so the pump won't resubmit them.
+  const stopAll = () => {
+    api.import.cancelAll().catch(() => {});
+    setJobs((prev) => prev.map((j) => {
+      if (j.status !== 'queued' && j.status !== 'running') return j;
+      if (j.backendJobId) api.import.cancel(j.backendJobId).catch(() => {});
+      settled.current.add(j.id);
+      runningSlugs.current.delete(j.slug.toLowerCase());
+      return { ...j, status: 'cancelled' as const, log: [...(j.log || []), { text: 'Cancelled by user', status: 'error' }] };
+    }));
+  };
+
   const activeCount = jobs.filter((j) => j.status === 'queued' || j.status === 'running').length;
 
-  return { jobs, enqueue, retryJob, retryFailed, clearFinished, activeCount };
+  return { jobs, enqueue, retryJob, retryFailed, clearFinished, stopJob, stopAll, activeCount };
 }

@@ -335,6 +335,9 @@ export const api = {
       return postForm('/api/import-problem', fd) as Promise<ImportJobResponse>;
     },
     verifyStatus: (jobId: string) => get(`/api/verify-status/${jobId}`) as Promise<VerifyStatusResponse>,
+    // Stop a running import mid-flight (or all of them).
+    cancel: (jobId: string) => post(`/api/import-cancel/${jobId}`, {}) as Promise<{ jobId: string; cancelled: boolean }>,
+    cancelAll: () => post('/api/import-cancel-all', {}) as Promise<{ cancelled: number }>,
     // Downloads via the stable primary origin (opens a browser download).
     downloadPackageUrl: (jobId: string, problemId?: number) =>
       `${PRIMARY}/api/download-package/${jobId}${problemId != null ? `?problemId=${problemId}` : ''}`,

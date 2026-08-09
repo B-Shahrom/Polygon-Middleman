@@ -109,7 +109,7 @@ export type Phase = 'select' | 'preview' | 'queue';
 
 // A single queued import (one problem). Jobs are processed by a bounded worker
 // pool; same-slug jobs are serialized. Each job keeps its own log.
-export type JobStatus = 'queued' | 'running' | 'done' | 'warnings' | 'failed';
+export type JobStatus = 'queued' | 'running' | 'done' | 'warnings' | 'failed' | 'cancelled';
 
 export interface ImportJob {
   id: string;

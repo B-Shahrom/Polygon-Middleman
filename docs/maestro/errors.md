@@ -25,6 +25,7 @@ Polygon `FAILED` through as HTTP **200** with `status:"FAILED"` in the body —
 | `STEP_FAILED` | A pipeline step errored **after in-pipeline retries** — commit **skipped**. Transient Polygon HTML/non-JSON responses are now retried inside the pipeline (3× with backoff, `import_pipeline.py` `_Api.call`), so a single blip no longer reaches here; this code means either a *persistent* transient failure or a genuine content error (e.g. a non-compiling `solution.cpp` — Polygon rejects it at `saveSolution`). | `retry`, but **cap retries** — a content error won't recover; read `log[]` for the reason. |
 | `CREATE_FAILED` | Couldn't create or resolve the problem. | `halt`. |
 | `INTERRUPTED` | The backend restarted while this problem was still importing. The pipeline's background task can't be resumed, so the reloaded job marks the in-flight problem failed (`import_jobs.py` `load_persisted`). Completed problems in the same job keep their real state. | `retry` — re-POST; `onExists=fill` makes it idempotent. |
+| `CANCELLED` | A caller stopped the import mid-flight via `POST /api/import-cancel/{jobId}` (or `/api/import-cancel-all`). The background task is cancelled at its next await; unfinished problems get this code and `importState: cancelled`. Nothing was committed to Polygon. | `halt` — it was a deliberate stop, don't auto-retry. A human can re-POST to resume (`onExists=fill` is clean). |
 
 ## Build/verify codes — `verify-status.problems[].verify.{state,code,clientAction}`
 
