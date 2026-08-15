@@ -21,8 +21,9 @@ Polygon `FAILED` through as HTTP **200** with `status:"FAILED"` in the body —
 | `IMPORTED` | Created/filled, committed, build+verify requested. | `proceed` — poll `verify` below. |
 | `IMPORTED_ALREADY_VERIFIED` | Committed, but the revision already had a non-failed verified package. **This is the `FAILED`-that-means-success from the C-2 finding — the package is `READY` and usable, NOT a failure.** (`import_pipeline.py` `_is_already_verified`, `_classify`.) | **`success`** — fetch the package. |
 | `TESTS_INCOMPLETE` | Tests still missing after 4 fill rounds; **not committed** (`pipeline` gate). | `retry` — re-POST; the fill/append logic completes the gaps (idempotent). |
+| `TEST_TOO_BIG` | One or more tests exceed Polygon's per-test size cap (~30 MB) — Polygon returns **HTTP 413 Payload Too Large**. Detected on `saveTest`, raised immediately (**never retried** — retrying a 413 can't succeed), excluded from the fill loop; **commit is skipped** (broken testset). The message lists the offending test indices. | `halt` — shrink or split those tests, then re-POST. Retrying as-is fails identically. |
 | `VERIFY_REQUEST_FAILED` | Committed, but the `buildPackage` trigger failed (a non-already-verified error). | `retry`. |
-| `STEP_FAILED` | A pipeline step errored **after in-pipeline retries** — commit **skipped**. Transient Polygon HTML/non-JSON responses are now retried inside the pipeline (3× with backoff, `import_pipeline.py` `_Api.call`), so a single blip no longer reaches here; this code means either a *persistent* transient failure or a genuine content error (e.g. a non-compiling `solution.cpp` — Polygon rejects it at `saveSolution`). | `retry`, but **cap retries** — a content error won't recover; read `log[]` for the reason. |
+| `STEP_FAILED` | A pipeline step errored **after in-pipeline retries** — commit **skipped**. Transient Polygon responses (`503`/`502` unavailable, `429 Too Many Requests`) are retried inside the pipeline (6× exponential backoff, `import_pipeline.py` `_Api.call`; a `429` backs off harder). A single blip no longer reaches here; this code means either a *persistent* transient failure or a genuine content error (e.g. a non-compiling `solution.cpp`). | `retry`, but **cap retries** — a content error won't recover; read `log[]` for the reason. |
 | `CREATE_FAILED` | Couldn't create or resolve the problem. | `halt`. |
 | `INTERRUPTED` | The backend restarted while this problem was still importing. The pipeline's background task can't be resumed, so the reloaded job marks the in-flight problem failed (`import_jobs.py` `load_persisted`). Completed problems in the same job keep their real state. | `retry` — re-POST; `onExists=fill` makes it idempotent. |
 | `CANCELLED` | A caller stopped the import mid-flight via `POST /api/import-cancel/{jobId}` (or `/api/import-cancel-all`). The background task is cancelled at its next await; unfinished problems get this code and `importState: cancelled`. Nothing was committed to Polygon. | `halt` — it was a deliberate stop, don't auto-retry. A human can re-POST to resume (`onExists=fill` is clean). |
@@ -127,3 +128,16 @@ Upload it as one of the multipart `files` (named `MANIFEST.json`, or any `.json`
   `{timeLimit (ms), memoryLimit (MB), measuredWorstMs, archiveVerified}`. Absent a manifest (or an
   undescribed slug) it is `null`. The archive-derived `timeLimit`/`memoryLimit` stay `null` as
   always — the manifest is a separate, clearly-namespaced source.
+
+## Load & rate limiting (429)
+
+Polygon rate-limits (**HTTP 429 Too Many Requests**) when too many requests fire at once — a
+large parallel batch trips it, and each retry adds to the flood. Two guards:
+
+- **App-wide concurrency cap.** `call_polygon` is gated by a semaphore
+  (`polygon_api.MAX_CONCURRENT_POLYGON`, default 4), so total concurrent Polygon requests stay
+  bounded no matter how many import jobs run in parallel. Raising the UI's "parallel agents"
+  above this only queues the surplus behind the gate — it doesn't increase Polygon load.
+- **Harder backoff on 429.** A `429` is retried like other transients but with a longer delay,
+  so a retry doesn't immediately re-trip the limit. A sustained 429 storm still slows a batch;
+  the fix is fewer parallel jobs, not more retries.

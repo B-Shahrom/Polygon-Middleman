@@ -41,6 +41,12 @@ class Logger:
 _EXISTS_RE = re.compile(r"already\s+have|already\s+exists|such\s+problem", re.I)
 
 
+class PayloadTooLarge(RuntimeError):
+    """Polygon returned HTTP 413 — the item (a test, usually) exceeds Polygon's
+    per-item size cap (~30 MB). PERMANENT: retrying can never succeed, so this is
+    raised immediately and never retried."""
+
+
 class _Api:
     def __init__(self, api_key: str, api_secret: str):
         self._key = api_key
@@ -50,25 +56,36 @@ class _Api:
         """Call Polygon, retrying TRANSIENT failures with EXPONENTIAL backoff.
 
         Polygon's front intermittently returns an HTML error page instead of JSON —
-        typically a `503 Service Temporarily Unavailable` under load — and it tends
-        to land on the first file upload of a problem (the checker), so a single blip
-        must not fail a whole import. The old 3-try / ~4.5s budget gave up while the
-        503 window was still open; this rides over a longer one (~50s across 6 tries,
-        2/4/8/16/20s) and logs each retry so the blip is visible, not silent.
+        `503`/`502` under load, or `429 Too Many Requests` when a big parallel batch
+        outruns its rate limit — so a single blip must not fail a whole import. This
+        rides over ~50s across 6 tries; a `429` backs off HARDER (retrying a rate
+        limit fast only adds to the flood).
 
-        A real Polygon `FAILED` (valid JSON) is a genuine error and is NOT retried.
-        saveTest/saveFile/saveStatement are idempotent overwrites, so a retry is safe."""
+        A `413 Payload Too Large` is the exception: the item exceeds Polygon's size
+        cap and NO retry can help, so it's raised immediately as PayloadTooLarge — no
+        wasted retry budget. A real Polygon `FAILED` (valid JSON) is a genuine error
+        and is NOT retried; saveTest/saveFile/saveStatement are idempotent, so retry
+        is safe."""
         last = ""
         for attempt in range(retries):
             text = ""
+            rate_limited = False
             try:
                 body, _ = await call_polygon(method, self._key, self._secret, params, files)
                 text = body.decode("utf-8", errors="replace")
                 data = json.loads(text)
-            except json.JSONDecodeError:                         # HTML error page — transient
+            except json.JSONDecodeError:                         # HTML error page
+                if ("413" in text) or ("Payload Too Large" in text):
+                    raise PayloadTooLarge(
+                        f"{method}: 413 Payload Too Large — exceeds Polygon's size cap (retrying won't help)")
                 snippet = " ".join(text.split())[:100]
-                is_503 = ("503" in text) or ("502" in text) or ("Unavailable" in text)
-                last = f"{'Polygon 503/unavailable' if is_503 else 'non-JSON'} response ({snippet})"
+                if ("429" in text) or ("Too Many Requests" in text):
+                    rate_limited = True
+                    last = f"Polygon 429 rate-limited ({snippet})"
+                elif ("503" in text) or ("502" in text) or ("Unavailable" in text) or ("Bad Gateway" in text):
+                    last = f"Polygon 5xx unavailable ({snippet})"
+                else:
+                    last = f"non-JSON response ({snippet})"
             except Exception as e:                               # network / transport — transient
                 last = f"transport error: {e}"
             else:
@@ -76,7 +93,9 @@ class _Api:
                     raise RuntimeError(data.get("comment", f"{method} failed"))
                 return data.get("result")
             if attempt < retries - 1:
-                delay = min(2.0 * (2 ** attempt), 20.0)          # 2,4,8,16,20 → ~50s total
+                delay = min(2.0 * (2 ** attempt), 20.0)          # 2,4,8,16,20
+                if rate_limited:
+                    delay = min(delay * 2, 30.0)                 # back off harder on a rate limit
                 alog.record("warn", "import",
                             f"{method}: {last} — retrying (attempt {attempt + 2}/{retries}) in {int(delay)}s")
                 await asyncio.sleep(delay)
@@ -117,7 +136,9 @@ def _plan_test_uploads(existing: List[Dict], incoming: List[Dict]) -> List[Dict]
     return plan
 
 
-async def _save_one_test(api: _Api, pid: int, t: Dict) -> bool:
+async def _save_one_test(api: _Api, pid: int, t: Dict):
+    """Returns True (uploaded), "toobig" (413 — exceeds Polygon's size cap, permanent),
+    or False (transient failure — worth a fill-round retry)."""
     try:
         params = {
             "problemId": pid, "testset": "tests", "testIndex": t["index"],
@@ -128,6 +149,8 @@ async def _save_one_test(api: _Api, pid: int, t: Dict) -> bool:
             params["testDescription"] = t["filename"]
         await api.call("problem.saveTest", params)
         return True
+    except PayloadTooLarge:
+        return "toobig"
     except Exception:
         return False
 
@@ -209,34 +232,47 @@ async def run_import_pipeline(parsed: Dict, opts: Dict, api_key: str, api_secret
     # Shared: description-keyed test upload with self-healing fill.
     plan: List[Dict] = []
     tests_complete = True
+    tests_too_big = False
 
     async def upload_tests():
-        nonlocal plan, tests_complete
+        nonlocal plan, tests_complete, tests_too_big
         if not parsed["tests"]:
             return
         async def do():
-            nonlocal plan, tests_complete
+            nonlocal plan, tests_complete, tests_too_big
             existing = await _fetch_existing_tests(api, pid)
             plan = _plan_test_uploads(existing, parsed["tests"])
+            too_big: set = set()          # test indices Polygon rejected as 413 (permanent)
             for t in plan:
-                await _save_one_test(api, pid, t)
-            missing = await _find_missing_tests(api, pid, plan)
+                if await _save_one_test(api, pid, t) == "toobig":
+                    too_big.add(t["index"])
+            # A too-big test can never upload — don't feed it back into the fill loop.
+            def _still_missing(found):
+                return [t for t in found if t["index"] not in too_big]
+            missing = _still_missing(await _find_missing_tests(api, pid, plan))
             rounds = 0
             refilled = 0
             while missing and rounds < 4:
                 log.update_last("running", f"Filling {len(missing)} missing test(s) (round {rounds + 1})...")
                 for t in missing:
-                    if await _save_one_test(api, pid, t):
+                    r = await _save_one_test(api, pid, t)
+                    if r == "toobig":
+                        too_big.add(t["index"])
+                    elif r:
                         refilled += 1
-                missing = await _find_missing_tests(api, pid, plan)
+                missing = _still_missing(await _find_missing_tests(api, pid, plan))
                 rounds += 1
-            if missing:
+            if missing or too_big:
                 tests_complete = False
-                idxs = ", ".join(str(t["index"]) for t in missing)
-                raise RuntimeError(
-                    f"{len(missing)}/{len(plan)} test(s) still missing after auto-fill (indices {idxs}). "
-                    "Skipping commit & verify — retry to finish."
-                )
+                parts = []
+                if too_big:
+                    tests_too_big = True
+                    parts.append(f"{len(too_big)} test(s) exceed Polygon's size cap (indices "
+                                 f"{', '.join(map(str, sorted(too_big)))}) — shrink or split them")
+                if missing:
+                    parts.append(f"{len(missing)} test(s) still missing after auto-fill "
+                                 f"(indices {', '.join(str(t['index']) for t in missing)})")
+                raise RuntimeError("; ".join(parts) + ". Skipping commit & verify — fix and retry.")
             existing_idx = {e["index"] for e in existing}
             replaced = sum(1 for t in plan if t["index"] in existing_idx)
             added = len(plan) - replaced
@@ -280,7 +316,8 @@ async def run_import_pipeline(parsed: Dict, opts: Dict, api_key: str, api_secret
         await upload_tests()
         await commit_and_verify()
         return _result(False, errors, pid, verify_requested, log, parsed, opts,
-                       already_verified=already_verified, tests_complete=tests_complete, committed=committed)
+                       already_verified=already_verified, tests_complete=tests_complete, committed=committed,
+                       tests_too_big=tests_too_big)
 
     # 2. Info
     async def set_info():
@@ -447,7 +484,7 @@ async def run_import_pipeline(parsed: Dict, opts: Dict, api_key: str, api_secret
     await commit_and_verify()
     return _result(False, errors, pid, verify_requested, log, parsed, opts,
                    already_verified=already_verified, tests_complete=tests_complete, committed=committed,
-                   applied_limits=applied_limits)
+                   applied_limits=applied_limits, tests_too_big=tests_too_big)
 
 
 async def _discard(api: _Api, pid: int):
@@ -480,11 +517,16 @@ def _is_already_verified(msg: str) -> bool:
 #   success  — treat as done; the built package is usable now (fetch it).
 #   retry    — transient / idempotent; re-running the import is safe.
 #   halt     — broken input/config; stop and surface — retrying won't help.
-def _classify(pid, errors, verify_requested, already_verified, tests_complete, committed):
+def _classify(pid, errors, verify_requested, already_verified, tests_complete, committed,
+              tests_too_big=False):
     if pid is None:
         return "CREATE_FAILED", "halt"
     if already_verified:
         return "IMPORTED_ALREADY_VERIFIED", "success"
+    if tests_too_big:
+        # A test exceeds Polygon's size cap — re-uploading it will fail identically.
+        # Needs the test shrunk/split, so don't tell an orchestrator to retry blindly.
+        return "TEST_TOO_BIG", "halt"
     if not tests_complete:
         return "TESTS_INCOMPLETE", "retry"
     if errors == 0:
@@ -497,8 +539,9 @@ def _classify(pid, errors, verify_requested, already_verified, tests_complete, c
 def _result(failed: bool, errors: int, pid: Optional[int], verify_requested: bool,
             log: Logger, parsed: Dict, opts: Dict, *,
             already_verified: bool = False, tests_complete: bool = True, committed: bool = False,
-            applied_limits: Optional[Dict[str, Optional[int]]] = None) -> Dict:
-    code, action = _classify(pid, errors, verify_requested, already_verified, tests_complete, committed)
+            applied_limits: Optional[Dict[str, Optional[int]]] = None, tests_too_big: bool = False) -> Dict:
+    code, action = _classify(pid, errors, verify_requested, already_verified, tests_complete, committed,
+                             tests_too_big)
     applied_limits = applied_limits or {"timeLimit": None, "memoryLimit": None}
     return {
         "name": parsed.get("displayName") or opts["slug"],

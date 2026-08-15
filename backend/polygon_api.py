@@ -10,6 +10,13 @@ import requests as sync_requests
 
 POLYGON_BASE_URL = "https://polygon.codeforces.com/api"
 
+# Cap total concurrent Polygon API requests app-wide. Polygon rate-limits (HTTP 429)
+# when too many requests fire at once — a big parallel import batch trips it easily,
+# and retrying the 429s only adds to the flood. This smooths total load at the source,
+# independent of how many import jobs the UI runs in parallel.
+MAX_CONCURRENT_POLYGON = 4
+_POLYGON_GATE = asyncio.Semaphore(MAX_CONCURRENT_POLYGON)
+
 
 def _to_str(v: Any) -> str:
     if isinstance(v, bool):
@@ -52,22 +59,24 @@ async def call_polygon(
 
     url = f"{POLYGON_BASE_URL}/{method}"
 
-    if files:
-        # polygon-cli approach: send ALL params via files= (not split data/files)
-        all_parts: dict = {}
-        for k, v in params.items():
-            if k in files:
-                # Send the actual file with its filename
-                filename, content, mime_type = files[k]
-                all_parts[k] = (filename, content, mime_type)
-            else:
-                all_parts[k] = (None, v)
+    # Gate the actual network call so app-wide concurrency stays under the cap.
+    async with _POLYGON_GATE:
+        if files:
+            # polygon-cli approach: send ALL params via files= (not split data/files)
+            all_parts: dict = {}
+            for k, v in params.items():
+                if k in files:
+                    # Send the actual file with its filename
+                    filename, content, mime_type = files[k]
+                    all_parts[k] = (filename, content, mime_type)
+                else:
+                    all_parts[k] = (None, v)
 
-        resp = await asyncio.to_thread(
-            lambda: sync_requests.post(url, files=all_parts, timeout=120)
-        )
-        return resp.content, resp.headers.get("Content-Type", "application/octet-stream")
-    else:
-        async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
-            response = await client.post(url, data=params)
-        return response.content, response.headers.get("content-type", "application/octet-stream")
+            resp = await asyncio.to_thread(
+                lambda: sync_requests.post(url, files=all_parts, timeout=120)
+            )
+            return resp.content, resp.headers.get("Content-Type", "application/octet-stream")
+        else:
+            async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
+                response = await client.post(url, data=params)
+            return response.content, response.headers.get("content-type", "application/octet-stream")

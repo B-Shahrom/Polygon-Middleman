@@ -34,7 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import import_pipeline
 from import_pipeline import (
-    _Api, _classify, _is_already_verified, _plan_test_uploads, run_import_pipeline,
+    _Api, _classify, _is_already_verified, _plan_test_uploads, run_import_pipeline, PayloadTooLarge,
 )
 import zip_parser as zp
 import import_jobs
@@ -91,8 +91,10 @@ class FakePolygon:
         self.saved_tests: dict[int, dict[int, str]] = {}   # pid -> {index: description}
         self.next_id = 1000
         self.existing_names: dict[str, int] = {}           # name -> pid (problem.create says "exists")
-        self.transient: dict[str, int] = {}                # method -> remaining HTML responses
+        self.transient: dict[str, int] = {}                # method -> remaining HTML (503) responses
+        self.rate_limit: dict[str, int] = {}               # method -> remaining 429 responses
         self.persistent_fail: dict[str, str] = {}          # method -> FAILED comment
+        self.oversized: set = set()                        # saveTest testIndex values → 413
         self.build_already_verified = False
 
     def _ok(self, result=None):
@@ -101,13 +103,21 @@ class FakePolygon:
     def _failed(self, comment):
         return (json.dumps({"status": "FAILED", "comment": comment}).encode(), "application/json")
 
+    def _html(self, title):
+        return (f"<html><head><title>{title}</title></head><body>{title}</body></html>".encode(), "text/html")
+
     async def __call__(self, method, key, secret, params=None, files=None):
         self.calls.append(method)
         params = params or {}
 
-        if self.transient.get(method, 0) > 0:            # transient non-JSON blip
+        if self.transient.get(method, 0) > 0:            # transient 503 blip
             self.transient[method] -= 1
-            return (b"<!DOCTYPE html><html>upstream error</html>", "text/html")
+            return self._html("503 Service Temporarily Unavailable")
+        if self.rate_limit.get(method, 0) > 0:           # 429 rate limit
+            self.rate_limit[method] -= 1
+            return self._html("429 Too Many Requests")
+        if method == "problem.saveTest" and int(params.get("testIndex", 0)) in self.oversized:
+            return self._html("413 Payload Too Large")   # oversized test — permanent
         if method in self.persistent_fail:               # genuine Polygon FAILED (valid JSON)
             return self._failed(self.persistent_fail[method])
 
@@ -260,6 +270,24 @@ class TestApiRetry(unittest.TestCase):
             run(api.call("problem.saveFile", {"problemId": 1}))
         self.assertEqual(fake.calls.count("problem.saveFile"), 4)      # 3 retries + success
 
+    def test_429_rate_limit_is_retried(self):
+        fake = FakePolygon()
+        fake.rate_limit["problem.saveTest"] = 2       # two 429s, then OK
+        with FakeTransport(fake):
+            api = _Api("k", "s")
+            run(api.call("problem.saveTest", {"problemId": 1, "testIndex": 1}))
+        self.assertEqual(fake.calls.count("problem.saveTest"), 3)      # retried, not failed
+
+    def test_413_payload_too_large_is_not_retried(self):
+        # A 413 is permanent — it must fail fast (PayloadTooLarge), not burn the
+        # whole retry budget on something that can never succeed.
+        fake = FakePolygon(); fake.oversized = {5}
+        with FakeTransport(fake):
+            api = _Api("k", "s")
+            with self.assertRaises(PayloadTooLarge):
+                run(api.call("problem.saveTest", {"problemId": 1, "testIndex": 5}))
+        self.assertEqual(fake.calls.count("problem.saveTest"), 1)      # ONE attempt, no retry
+
 
 # ── Pipeline (fake transport) ─────────────────────────────────────────────────
 
@@ -328,6 +356,17 @@ class TestPipeline(unittest.TestCase):
         res, fake = self._run(zp.parse_zip(make_zip()), opts=opts)
         self.assertTrue(res["ok"])
         self.assertIn("problem.saveFile", fake.calls)          # custom → upload the archive's checker
+
+    def test_oversized_test_flagged_not_looped(self):
+        # A 413 on one test must NOT be retried in the fill loop, must flag
+        # TEST_TOO_BIG/halt, and must skip the commit (broken testset).
+        fake = FakePolygon(); fake.oversized = {2}     # the 2nd planned test is over the cap
+        res, fake = self._run(zp.parse_zip(make_zip()), fake=fake)
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["errorCode"], "TEST_TOO_BIG")
+        self.assertEqual(res["clientAction"], "halt")          # retrying won't help — needs shrinking
+        self.assertNotIn("problem.commitChanges", fake.calls)  # never commits a broken testset
+        self.assertLessEqual(fake.calls.count("problem.saveTest"), 3)  # not a 6x×4-round retry storm
 
 
 # ── job_store persistence ─────────────────────────────────────────────────────
