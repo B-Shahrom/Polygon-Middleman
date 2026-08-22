@@ -109,6 +109,18 @@ export default function ZipImport({ open, onClose }: Props) {
     }).catch(() => {});
   }, [open]);
 
+  // When the modal opens and there are already-active jobs (e.g. rehydrated from the
+  // backend after a page reload), jump straight to the queue so they're visible —
+  // once per open, so the user can still navigate to "select" to add more.
+  const openedRef = useRef(false);
+  useEffect(() => {
+    if (!open) { openedRef.current = false; return; }
+    if (!openedRef.current && jobs.some((j) => j.status === 'running' || j.status === 'queued')) {
+      openedRef.current = true;
+      setPhase('queue');
+    }
+  }, [open, jobs]);
+
   const updateItem = (idx: number, patch: Partial<ParsedItem>) =>
     setItems((prev) => prev.map((it, i) => (i === idx ? { ...it, ...patch } : it)));
 

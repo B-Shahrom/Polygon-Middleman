@@ -113,6 +113,17 @@ export interface VerifyStatusResponse {
   problems: VerifyProblem[];
   parseErrors: { file: string; error: string }[];
 }
+// Recent jobs for rehydrating the queue after a reload. Same shape as verify-status
+// but without the live `verify` block (this list does no Polygon query).
+export interface ImportJobsListResponse {
+  jobs: {
+    jobId: string;
+    state: string;
+    createdAt: number;
+    problems: (Omit<VerifyProblem, 'verify'> & { verify?: VerifyProblem['verify'] })[];
+    parseErrors: { file: string; error: string }[];
+  }[];
+}
 
 export class ApiError extends Error {
   constructor(message: string, public status?: number) {
@@ -335,6 +346,8 @@ export const api = {
       return postForm('/api/import-problem', fd) as Promise<ImportJobResponse>;
     },
     verifyStatus: (jobId: string) => get(`/api/verify-status/${jobId}`) as Promise<VerifyStatusResponse>,
+    // Recent jobs still running/recent in the backend — to rehydrate the queue after a reload.
+    list: () => get('/api/import-jobs') as Promise<ImportJobsListResponse>,
     // Stop a running import mid-flight (or all of them).
     cancel: (jobId: string) => post(`/api/import-cancel/${jobId}`, {}) as Promise<{ jobId: string; cancelled: boolean }>,
     cancelAll: () => post('/api/import-cancel-all', {}) as Promise<{ cancelled: number }>,

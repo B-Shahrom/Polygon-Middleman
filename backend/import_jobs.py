@@ -118,6 +118,33 @@ def get_job(job_id: str) -> Optional[dict]:
     return _JOBS.get(job_id)
 
 
+def list_jobs(limit: int = 60, max_age_s: int = 1800) -> List[dict]:
+    """Recent jobs (newest first) as public summaries, so the UI can REHYDRATE its
+    queue after a reload/remount and keep tracking imports that are still running in
+    the backend. Fast (no Polygon query — the caller polls verify-status for live
+    build state). Returns jobs that are still importing OR were created within
+    `max_age_s`, capped at `limit`."""
+    now = time.time()
+    out: List[dict] = []
+    for job in sorted(_JOBS.values(), key=lambda j: j.get("createdAt", 0), reverse=True):
+        importing = job.get("state") == "running"
+        recent = (now - job.get("createdAt", 0)) < max_age_s
+        if not (importing or recent):
+            continue
+        problems = []
+        for p in job["problems"]:
+            rec = {k: p.get(k) for k in _PUBLIC_FIELDS}
+            rec["log"] = p.get("log", [])
+            problems.append(rec)
+        out.append({
+            "jobId": job["jobId"], "state": job["state"], "createdAt": job["createdAt"],
+            "problems": problems, "parseErrors": job.get("parseErrors", []),
+        })
+        if len(out) >= limit:
+            break
+    return out
+
+
 def job_problem_ids(job_id: str) -> List[int]:
     job = _JOBS.get(job_id)
     if not job:

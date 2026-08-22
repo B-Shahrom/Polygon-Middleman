@@ -20,6 +20,51 @@ export function useImportQueue(concurrency: number, onSettled: (job: ImportJob) 
   jobsRef.current = jobs;
   const runningSlugs = useRef<Set<string>>(new Set());
   const settled = useRef<Set<string>>(new Set());
+  const rehydrated = useRef(false);
+
+  // On mount, rehydrate the queue from the backend. A page reload / remount wipes the
+  // in-memory queue, but the backend jobs keep running (and are persisted) — so pull
+  // any still-importing / still-verifying job and re-attach the poller to it. Jobs are
+  // display-only after a reload (their File objects are gone), which is fine: they poll
+  // to completion, and re-import is a fresh action.
+  useEffect(() => {
+    if (rehydrated.current) return;
+    rehydrated.current = true;
+    (async () => {
+      try {
+        const { jobs: backendJobs } = await api.import.list();
+        const restored: ImportJob[] = [];
+        for (const bj of backendJobs) {
+          for (const p of bj.problems || []) {
+            const importing = p.importState === 'queued' || p.importState === 'running';
+            const verifying = p.importState === 'imported' && p.verifyRequested;
+            if (!importing && !verifying) continue;   // skip settled jobs (history, not active)
+            restored.push({
+              id: `restored-${bj.jobId}-${p.slug}`,
+              batchId: `restored-${bj.jobId}`,
+              name: p.name || p.slug,
+              slug: p.slug,
+              files: [],
+              opts: { slug: p.slug, onExists: 'fill', checkerType: '', solutionType: '' },
+              status: 'running',
+              backendJobId: bj.jobId,
+              log: p.log || [],
+              errors: p.errors || 0,
+              problemId: p.problemId ?? undefined,
+              verifyStatus: verifying ? 'verifying' : undefined,
+            });
+          }
+        }
+        if (restored.length) {
+          setJobs((prev) => {
+            const have = new Set(prev.map((j) => j.backendJobId).filter(Boolean));
+            const add = restored.filter((r) => !have.has(r.backendJobId));
+            return add.length ? [...prev, ...add] : prev;
+          });
+        }
+      } catch { /* best-effort — a failed rehydrate just shows an empty queue */ }
+    })();
+  }, []);
 
   const patch = (id: string, p: Partial<ImportJob>) =>
     setJobs((prev) => prev.map((j) => (j.id === id ? { ...j, ...p } : j)));

@@ -1007,6 +1007,15 @@ async def verify_status(jobId: str):
     return status
 
 
+@app.get("/api/import-jobs")
+async def import_jobs_list(limit: int = 60):
+    """Recent import jobs (newest first) as summaries — lets the UI rehydrate its
+    queue after a reload and keep tracking imports still running in the backend. No
+    Polygon query (fast); poll `verify-status/{jobId}` for live build state."""
+    import import_jobs
+    return {"jobs": import_jobs.list_jobs(limit)}
+
+
 @app.post("/api/import-cancel/{jobId}")
 async def import_cancel(jobId: str):
     """Stop a running import mid-flight. The background task is cancelled at its next

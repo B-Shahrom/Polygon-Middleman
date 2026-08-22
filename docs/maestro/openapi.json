@@ -1863,6 +1863,45 @@
         }
       }
     },
+    "/api/import-jobs": {
+      "get": {
+        "summary": "Import Jobs List",
+        "description": "Recent import jobs (newest first) as summaries — lets the UI rehydrate its\nqueue after a reload and keep tracking imports still running in the backend. No\nPolygon query (fast); poll `verify-status/{jobId}` for live build state.",
+        "operationId": "import_jobs_list_api_import_jobs_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 60,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/import-cancel/{jobId}": {
       "post": {
         "summary": "Import Cancel",
